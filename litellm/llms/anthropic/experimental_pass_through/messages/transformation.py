@@ -28,6 +28,7 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
             "model",
             "system",
             "max_tokens",
+            "metadata",
             "stop_sequences",
             "temperature",
             "top_p",
@@ -36,8 +37,6 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
             "tool_choice",
             "thinking",
             "context_management",
-            # TODO: Add Anthropic `metadata` support
-            # "metadata",
         ]
 
     def get_complete_url(
@@ -64,16 +63,24 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
         api_key: Optional[str] = None,
         api_base: Optional[str] = None,
     ) -> Tuple[dict, Optional[str]]:
-        import os
+        """
+        Mirror Anthropic header behavior used by the OpenAI-format Anthropic adapter:
+        - Accept bearer auth (OAuth subscription) without requiring x-api-key.
+        - Auto-inject required beta headers (prompt caching, tool betas, etc.) based on request shape.
+        - Preserve/merge any user-provided `anthropic-beta` header values.
+        """
 
-        if api_key is None:
-            api_key = os.getenv("ANTHROPIC_API_KEY")
-        if "x-api-key" not in headers and api_key:
-            headers["x-api-key"] = api_key
-        if "anthropic-version" not in headers:
-            headers["anthropic-version"] = DEFAULT_ANTHROPIC_API_VERSION
-        if "content-type" not in headers:
-            headers["content-type"] = "application/json"
+        from ...common_utils import AnthropicModelInfo
+
+        headers = AnthropicModelInfo().validate_environment(
+            headers=headers,
+            model=model,
+            messages=messages,  # type: ignore[arg-type]
+            optional_params=optional_params,
+            litellm_params=litellm_params,
+            api_key=api_key,
+            api_base=api_base,
+        )
 
         headers = self._update_headers_with_optional_anthropic_beta(
             headers=headers,

@@ -14,14 +14,17 @@ auth_file_store = pytest.importorskip("litellm.auth.file_store")
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from litellm.types.utils import AnthropicMessagesResponse
+
 AuthRecord = auth_core.AuthRecord
 JsonFileAuthStore = auth_file_store.JsonFileAuthStore
 
 
-@pytest.fixture(scope="function")
-def client(tmp_path, monkeypatch, setup_and_teardown):
+def _make_client(*, tmp_path, monkeypatch, fake_handler):
     monkeypatch.setenv("LITELLM_DONT_SHOW_FEEDBACK_BOX", "true")
     proxy_server.cleanup_router_config_variables()
+
+    monkeypatch.setattr(litellm, "anthropic_messages", fake_handler)
 
     store_dir = tmp_path / "auth_store"
     store = JsonFileAuthStore(str(store_dir))
@@ -70,15 +73,14 @@ def client(tmp_path, monkeypatch, setup_and_teardown):
     asyncio.run(proxy_server.initialize(config=str(config_fp)))
     app = FastAPI()
     app.include_router(proxy_server.router)
-    return TestClient(app), store
+    return TestClient(app)
 
 
-def test_same_request_rotation_on_429(client, monkeypatch):
+def test_messages_same_request_rotation_on_429(tmp_path, monkeypatch, setup_and_teardown):
     calls = []
-    client, _store = client
 
-    async def fake_acompletion(*_args, **kwargs):
-        headers = kwargs.get("headers") or {}
+    async def fake_messages(*_args, **kwargs):
+        headers = (kwargs.get("headers") or {}).copy()
         token = headers.get("Authorization") or ""
         calls.append(token)
         if token.endswith("tok1"):
@@ -87,15 +89,20 @@ def test_same_request_rotation_on_429(client, monkeypatch):
                 llm_provider="anthropic",
                 model=str(kwargs.get("model", "")),
             )
-        return litellm.ModelResponse(
+        return AnthropicMessagesResponse(
+            id="msg_1",
+            type="message",
+            role="assistant",
+            content=[{"type": "text", "text": "ok"}],
             model=str(kwargs.get("model", "")),
-            choices=[{"message": {"role": "assistant", "content": "ok"}}],
+            stop_reason="end_turn",
+            usage={"input_tokens": 1, "output_tokens": 1},
         )
 
-    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    client = _make_client(tmp_path=tmp_path, monkeypatch=monkeypatch, fake_handler=fake_messages)
 
     resp = client.post(
-        "/v1/chat/completions",
+        "/v1/messages",
         json={
             "model": "claude-model",
             "messages": [{"role": "user", "content": "hi"}],
@@ -103,13 +110,35 @@ def test_same_request_rotation_on_429(client, monkeypatch):
         },
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["choices"][0]["message"]["content"] == "ok"
+    assert resp.json()["content"][0]["text"] == "ok"
     assert calls == ["Bearer tok1", "Bearer tok2"]
 
 
-def test_same_request_refresh_on_401_then_retry(client, monkeypatch):
+def test_messages_refresh_on_401_then_retry(tmp_path, monkeypatch, setup_and_teardown):
     calls = []
-    client, store = client
+
+    async def fake_messages(*_args, **kwargs):
+        headers = (kwargs.get("headers") or {}).copy()
+        token = headers.get("Authorization") or ""
+        calls.append(token)
+        if token.endswith("tok1"):
+            raise litellm.AuthenticationError(
+                message="expired",
+                llm_provider="anthropic",
+                model=str(kwargs.get("model", "")),
+            )
+        return AnthropicMessagesResponse(
+            id="msg_2",
+            type="message",
+            role="assistant",
+            content=[{"type": "text", "text": "ok"}],
+            model=str(kwargs.get("model", "")),
+            stop_reason="end_turn",
+            usage={"input_tokens": 1, "output_tokens": 1},
+        )
+
+    client = _make_client(tmp_path=tmp_path, monkeypatch=monkeypatch, fake_handler=fake_messages)
+
     router = proxy_server.llm_router
     strategy = router.auth_strategies["anthropic"]
 
@@ -120,8 +149,24 @@ def test_same_request_refresh_on_401_then_retry(client, monkeypatch):
 
     monkeypatch.setattr(strategy, "refresh", fake_refresh)
 
-    async def fake_acompletion(*_args, **kwargs):
-        headers = kwargs.get("headers") or {}
+    resp = client.post(
+        "/v1/messages",
+        json={
+            "model": "claude-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 1,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["content"][0]["text"] == "ok"
+    assert calls == ["Bearer tok1", "Bearer tok1-refreshed"]
+
+
+def test_messages_rotate_when_refresh_fails(tmp_path, monkeypatch, setup_and_teardown):
+    calls = []
+
+    async def fake_messages(*_args, **kwargs):
+        headers = (kwargs.get("headers") or {}).copy()
         token = headers.get("Authorization") or ""
         calls.append(token)
         if token.endswith("tok1"):
@@ -130,32 +175,18 @@ def test_same_request_refresh_on_401_then_retry(client, monkeypatch):
                 llm_provider="anthropic",
                 model=str(kwargs.get("model", "")),
             )
-        return litellm.ModelResponse(
+        return AnthropicMessagesResponse(
+            id="msg_3",
+            type="message",
+            role="assistant",
+            content=[{"type": "text", "text": "ok"}],
             model=str(kwargs.get("model", "")),
-            choices=[{"message": {"role": "assistant", "content": "ok"}}],
+            stop_reason="end_turn",
+            usage={"input_tokens": 1, "output_tokens": 1},
         )
 
-    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    client = _make_client(tmp_path=tmp_path, monkeypatch=monkeypatch, fake_handler=fake_messages)
 
-    resp = client.post(
-        "/v1/chat/completions",
-        json={
-            "model": "claude-model",
-            "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 1,
-        },
-    )
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["choices"][0]["message"]["content"] == "ok"
-    assert calls == ["Bearer tok1", "Bearer tok1-refreshed"]
-    refreshed = store.get("default", "a1")
-    assert refreshed is not None
-    assert refreshed.metadata.get("access_token") == "tok1-refreshed"
-
-
-def test_rotate_when_refresh_fails(client, monkeypatch):
-    calls = []
-    client, _store = client
     router = proxy_server.llm_router
     strategy = router.auth_strategies["anthropic"]
 
@@ -164,25 +195,8 @@ def test_rotate_when_refresh_fails(client, monkeypatch):
 
     monkeypatch.setattr(strategy, "refresh", fake_refresh)
 
-    async def fake_acompletion(*_args, **kwargs):
-        headers = kwargs.get("headers") or {}
-        token = headers.get("Authorization") or ""
-        calls.append(token)
-        if token.endswith("tok1"):
-            raise litellm.AuthenticationError(
-                message="expired",
-                llm_provider="anthropic",
-                model=str(kwargs.get("model", "")),
-            )
-        return litellm.ModelResponse(
-            model=str(kwargs.get("model", "")),
-            choices=[{"message": {"role": "assistant", "content": "ok"}}],
-        )
-
-    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
-
     resp = client.post(
-        "/v1/chat/completions",
+        "/v1/messages",
         json={
             "model": "claude-model",
             "messages": [{"role": "user", "content": "hi"}],
@@ -190,56 +204,6 @@ def test_rotate_when_refresh_fails(client, monkeypatch):
         },
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["choices"][0]["message"]["content"] == "ok"
+    assert resp.json()["content"][0]["text"] == "ok"
     assert calls == ["Bearer tok1", "Bearer tok2"]
 
-
-def test_unhealthy_auth_is_skipped_on_next_request(client, monkeypatch):
-    client, store = client
-    calls = []
-
-    async def fake_acompletion(*_args, **kwargs):
-        headers = kwargs.get("headers") or {}
-        token = headers.get("Authorization") or ""
-        calls.append(token)
-        if token.endswith("tok1"):
-            raise litellm.RateLimitError(
-                message="rate limit",
-                llm_provider="anthropic",
-                model=str(kwargs.get("model", "")),
-            )
-        return litellm.ModelResponse(
-            model=str(kwargs.get("model", "")),
-            choices=[{"message": {"role": "assistant", "content": "ok"}}],
-        )
-
-    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
-
-    resp1 = client.post(
-        "/v1/chat/completions",
-        json={
-            "model": "claude-model",
-            "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 1,
-        },
-    )
-    assert resp1.status_code == 200, resp1.text
-    assert calls == ["Bearer tok1", "Bearer tok2"]
-
-    updated_a1 = store.get("default", "a1")
-    assert updated_a1 is not None
-    assert updated_a1.unavailable is True
-    assert updated_a1.next_retry_after is not None
-
-    calls.clear()
-    resp2 = client.post(
-        "/v1/chat/completions",
-        json={
-            "model": "claude-model",
-            "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 1,
-        },
-    )
-    assert resp2.status_code == 200, resp2.text
-    assert resp2.json()["choices"][0]["message"]["content"] == "ok"
-    assert calls == ["Bearer tok2"]

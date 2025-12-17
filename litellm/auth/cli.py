@@ -86,6 +86,9 @@ def _wait_for_oauth_callback(
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+                result.error = "state_mismatch"
+                result.error_description = "State parameter mismatch"
+                done.set()
                 return
 
             result.code = (params.get("code") or [None])[0]
@@ -109,6 +112,9 @@ def _wait_for_oauth_callback(
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+                result.error = "missing_code"
+                result.error_description = "Missing authorization code"
+                done.set()
                 return
 
             body = b"Login complete. You can close this window."

@@ -254,6 +254,8 @@ class CredentialSelector:
     ) -> AuthRecord:
         ts = now or _now()
         updated = auth.clone()
+        updated.request_count = int(updated.request_count) + 1
+        updated.last_request_at = ts
         updated.status = AuthStatus.ACTIVE
         updated.unavailable = False
         updated.next_retry_after = None
@@ -285,6 +287,9 @@ class CredentialSelector:
     ) -> AuthRecord:
         ts = now or _now()
         updated = auth.clone()
+        updated.request_count = int(updated.request_count) + 1
+        updated.error_count = int(updated.error_count) + 1
+        updated.last_request_at = ts
         # Optional: skip quota cooldowns entirely (useful in tests)
         disable_cooldown = self.disable_quota_cooldown
         if auth.provider in self.provider_quota_cooldown_overrides:
@@ -292,6 +297,7 @@ class CredentialSelector:
         if provider_model in self.model_quota_cooldown_overrides:
             disable_cooldown = self.model_quota_cooldown_overrides[provider_model]
         if is_quota and disable_cooldown:
+            updated.updated_at = ts
             updated.status_message = error_message
             state = updated.model_states.get(provider_model) or ModelState()
             state.status_message = error_message

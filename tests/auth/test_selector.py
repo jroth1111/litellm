@@ -2,6 +2,7 @@ import datetime
 import importlib.util
 import pathlib
 import sys
+import tempfile
 import types
 import unittest
 from typing import Dict, Optional
@@ -225,6 +226,23 @@ class SelectorTests(unittest.TestCase):
         self.assertIsNotNone(failed.next_retry_after)
         self.assertGreater(failed.next_retry_after, now)
         self.assertEqual(ms.next_retry_after, failed.next_retry_after)
+
+    def test_rotation_offset_persists_across_selector_instances(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            offset_path = str(pathlib.Path(tmpdir) / "offsets.json")
+            selector1 = CredentialSelector(offset_store_path=offset_path)
+            auths = [
+                make_auth("a1", "anthropic"),
+                make_auth("a2", "anthropic"),
+            ]
+            first = selector1.select("anthropic/claude", auth_records=auths)
+            self.assertIsNotNone(first)
+            self.assertEqual(first.auth.id, "a1")
+
+            selector2 = CredentialSelector(offset_store_path=offset_path)
+            second = selector2.select("anthropic/claude", auth_records=auths)
+            self.assertIsNotNone(second)
+            self.assertEqual(second.auth.id, "a2")
 
 
 if __name__ == "__main__":

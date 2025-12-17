@@ -183,20 +183,29 @@ async def exchange_token_with_server(
 ):
     if grant_type != "authorization_code":
         raise HTTPException(status_code=400, detail="Unsupported grant_type")
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing authorization code")
 
     if mcp_server.token_url is None:
         raise HTTPException(status_code=400, detail="MCP server token url is not set")
 
     proxy_base_url = get_request_base_url(request)
-    token_data = {
+    token_data: dict = {
         "grant_type": "authorization_code",
         "client_id": mcp_server.client_id if mcp_server.client_id else client_id,
-        "client_secret": mcp_server.client_secret
-        if mcp_server.client_secret
-        else client_secret,
         "code": code,
         "redirect_uri": f"{proxy_base_url}/callback",
     }
+
+    effective_client_secret = (
+        mcp_server.client_secret if mcp_server.client_secret else client_secret
+    )
+    # When the upstream OAuth provider does not require a client secret,
+    # some clients still expect a "client_secret" field from registration and
+    # will send a placeholder value (currently "dummy"). Never forward that
+    # placeholder to the upstream token endpoint.
+    if effective_client_secret and effective_client_secret != "dummy":
+        token_data["client_secret"] = effective_client_secret
 
     if code_verifier:
         token_data["code_verifier"] = code_verifier

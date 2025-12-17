@@ -185,6 +185,11 @@ def _serialize_auth(record: AuthRecord) -> Dict[str, Any]:
         "last_refreshed_at": _serialize_datetime(record.last_refreshed_at),
         "next_refresh_after": _serialize_datetime(record.next_refresh_after),
         "next_retry_after": _serialize_datetime(record.next_retry_after),
+        "request_count": int(record.request_count),
+        "error_count": int(record.error_count),
+        "prompt_tokens": int(record.prompt_tokens),
+        "completion_tokens": int(record.completion_tokens),
+        "last_request_at": _serialize_datetime(record.last_request_at),
     }
 
 
@@ -217,6 +222,11 @@ def _deserialize_auth(data: Dict[str, Any]) -> AuthRecord:
         last_refreshed_at=_deserialize_datetime(data.get("last_refreshed_at")),
         next_refresh_after=_deserialize_datetime(data.get("next_refresh_after")),
         next_retry_after=_deserialize_datetime(data.get("next_retry_after")),
+        request_count=int(data.get("request_count", 0) or 0),
+        error_count=int(data.get("error_count", 0) or 0),
+        prompt_tokens=int(data.get("prompt_tokens", 0) or 0),
+        completion_tokens=int(data.get("completion_tokens", 0) or 0),
+        last_request_at=_deserialize_datetime(data.get("last_request_at")),
     )
 
 

@@ -64,6 +64,9 @@ class AuthRecord:
         created_at/updated_at: Timestamps for auditing.
         last_refreshed_at/next_refresh_after: Token refresh bookkeeping.
         next_retry_after: Earliest time the credential should be retried.
+        request_count/error_count: Usage counters (best-effort; no API calls).
+        prompt_tokens/completion_tokens: Aggregate token usage counters (optional).
+        last_request_at: Last time this credential was used.
     """
 
     id: str
@@ -82,6 +85,11 @@ class AuthRecord:
     last_refreshed_at: Optional[datetime] = None
     next_refresh_after: Optional[datetime] = None
     next_retry_after: Optional[datetime] = None
+    request_count: int = 0
+    error_count: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    last_request_at: Optional[datetime] = None
 
     def clone(self) -> "AuthRecord":
         """Shallow copy with isolated mutable fields."""
@@ -122,6 +130,11 @@ class AuthRecord:
             last_refreshed_at=self.last_refreshed_at,
             next_refresh_after=self.next_refresh_after,
             next_retry_after=self.next_retry_after,
+            request_count=self.request_count,
+            error_count=self.error_count,
+            prompt_tokens=self.prompt_tokens,
+            completion_tokens=self.completion_tokens,
+            last_request_at=self.last_request_at,
             runtime=self.runtime,
         )
 
