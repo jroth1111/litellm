@@ -878,3 +878,262 @@ def providers() -> None:
             f"{p.get('provider')}\tflow={p.get('login_flow')}"
             f"\trefresh={p.get('supports_refresh')}\tmodels={p.get('supports_models_list')}"
         )
+
+
+def _format_time_delta(dt: Optional[datetime]) -> str:
+    """Format a datetime as a human-readable time delta from now."""
+    if dt is None:
+        return ""
+    now = _now()
+    if dt < now:
+        delta = now - dt
+        suffix = "ago"
+    else:
+        delta = dt - now
+        suffix = ""
+
+    total_seconds = int(delta.total_seconds())
+    if total_seconds < 60:
+        return f"{total_seconds}s {suffix}".strip()
+    elif total_seconds < 3600:
+        minutes = total_seconds // 60
+        return f"{minutes}m {suffix}".strip()
+    elif total_seconds < 86400:
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        if minutes > 0:
+            return f"{hours}h {minutes}m {suffix}".strip()
+        return f"{hours}h {suffix}".strip()
+    else:
+        days = total_seconds // 86400
+        hours = (total_seconds % 86400) // 3600
+        if hours > 0:
+            return f"{days}d {hours}h {suffix}".strip()
+        return f"{days}d {suffix}".strip()
+
+
+def _get_status_symbol(rec: AuthRecord) -> str:
+    """Get a status symbol for the record."""
+    now = _now()
+
+    # Check if expired
+    expiry = rec.expiration_time()
+    if expiry and expiry < now:
+        return "⚠"  # Expired
+
+    # Check if in cooldown
+    if rec.next_retry_after and rec.next_retry_after > now:
+        return "⏳"  # Cooldown
+
+    # Check quota exceeded
+    if rec.quota.exceeded:
+        return "⏳"  # Quota cooldown
+
+    # Check if unavailable
+    if rec.unavailable:
+        return "✗"  # Unavailable
+
+    # Check status
+    if rec.status == AuthStatus.ACTIVE:
+        return "✓"  # Active
+    elif rec.status == AuthStatus.EXPIRED:
+        return "⚠"  # Expired
+    elif rec.status == AuthStatus.ERROR:
+        return "✗"  # Error
+    elif rec.status == AuthStatus.DISABLED:
+        return "○"  # Disabled
+
+    return "?"
+
+
+def _get_status_text(rec: AuthRecord) -> str:
+    """Get status text for the record."""
+    now = _now()
+
+    # Check if expired
+    expiry = rec.expiration_time()
+    if expiry and expiry < now:
+        return "EXPIRED"
+
+    # Check if in cooldown
+    if rec.next_retry_after and rec.next_retry_after > now:
+        return f"COOLDOWN (retry in {_format_time_delta(rec.next_retry_after)})"
+
+    # Check quota exceeded
+    if rec.quota.exceeded:
+        recover = rec.quota.next_recover_at
+        if recover:
+            return f"QUOTA (retry in {_format_time_delta(recover)})"
+        return "QUOTA"
+
+    # Check if unavailable
+    if rec.unavailable:
+        return "UNAVAILABLE"
+
+    return rec.status.value.upper()
+
+
+@auth_cli.command()
+@click.option(
+    "--store",
+    "store_dir",
+    default=default_auth_store_dir(),
+    show_default=True,
+    help="Auth store directory",
+)
+@click.option(
+    "--namespace",
+    "--ns",
+    "ns",
+    default="default",
+    show_default=True,
+    help="Auth namespace",
+)
+@click.option(
+    "--encrypt/--plaintext",
+    "encrypt",
+    default=True,
+    show_default=True,
+    help="Use encrypted store.",
+)
+@click.option(
+    "--encryption-key",
+    default=None,
+    help="Secret used to derive the encryption key.",
+)
+@click.option(
+    "--allow-plaintext-fallback",
+    is_flag=True,
+    default=False,
+    help="Allow reading legacy plaintext auth JSON.",
+)
+@click.option(
+    "--provider",
+    "provider_filter",
+    default=None,
+    help="Filter by provider (e.g., anthropic, openai).",
+)
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    default=False,
+    help="Output as JSON.",
+)
+def status(
+    store_dir: str,
+    ns: str,
+    encrypt: bool,
+    encryption_key: Optional[str],
+    allow_plaintext_fallback: bool,
+    provider_filter: Optional[str],
+    output_json: bool,
+) -> None:
+    """
+    Show health status of all subscription accounts.
+
+    Displays account validity, expiry, cooldown state, and usage metrics
+    without making any API calls (no credits consumed).
+
+    Examples:
+      - `litellm auth status`
+      - `litellm auth status --provider anthropic`
+      - `litellm auth status --json`
+    """
+    store = _build_store(
+        store_dir,
+        encrypt=encrypt,
+        encryption_key=encryption_key,
+        allow_plaintext_fallback=allow_plaintext_fallback,
+    )
+    records = store.list(ns)
+
+    if provider_filter:
+        records = [r for r in records if r.provider == provider_filter.strip().lower()]
+
+    if not records:
+        click.echo("No auth records found.")
+        return
+
+    now = _now()
+
+    if output_json:
+        # JSON output
+        output = []
+        for rec in records:
+            expiry = rec.expiration_time()
+            output.append({
+                "id": rec.id,
+                "provider": rec.provider,
+                "label": rec.label,
+                "status": rec.status.value,
+                "status_text": _get_status_text(rec),
+                "unavailable": rec.unavailable,
+                "expires_at": expiry.isoformat() if expiry else None,
+                "expires_in_seconds": int((expiry - now).total_seconds()) if expiry and expiry > now else None,
+                "next_retry_after": rec.next_retry_after.isoformat() if rec.next_retry_after else None,
+                "quota_exceeded": rec.quota.exceeded,
+                "request_count": rec.request_count,
+                "error_count": rec.error_count,
+                "prompt_tokens": rec.prompt_tokens,
+                "completion_tokens": rec.completion_tokens,
+                "last_request_at": rec.last_request_at.isoformat() if rec.last_request_at else None,
+                "last_refreshed_at": rec.last_refreshed_at.isoformat() if rec.last_refreshed_at else None,
+                "account": rec.metadata.get("email") or rec.metadata.get("account") or "",
+            })
+        click.echo(json.dumps(output, indent=2))
+        return
+
+    # Group by provider
+    by_provider: Dict[str, list] = {}
+    for rec in records:
+        by_provider.setdefault(rec.provider, []).append(rec)
+
+    for provider, recs in sorted(by_provider.items()):
+        click.echo(f"\nProvider: {provider} ({len(recs)} account{'s' if len(recs) != 1 else ''})")
+
+        for rec in recs:
+            symbol = _get_status_symbol(rec)
+            status_text = _get_status_text(rec)
+
+            # Get expiry info
+            expiry = rec.expiration_time()
+            if expiry:
+                if expiry < now:
+                    expiry_text = "expired"
+                else:
+                    expiry_text = f"expires in {_format_time_delta(expiry)}"
+            else:
+                expiry_text = "no expiry"
+
+            # Get last used info
+            if rec.last_request_at:
+                last_used = f"last used: {_format_time_delta(rec.last_request_at)} ago"
+            else:
+                last_used = "never used"
+
+            # Get error info
+            error_info = f"{rec.error_count} errors" if rec.error_count > 0 else "0 errors"
+
+            # Get token usage
+            total_tokens = rec.prompt_tokens + rec.completion_tokens
+            if total_tokens > 0:
+                token_info = f"{total_tokens:,} tokens"
+            else:
+                token_info = ""
+
+            # Get account identity
+            account = rec.metadata.get("email") or rec.metadata.get("account") or ""
+            if account:
+                account = f" ({account})"
+
+            # Format output line
+            id_display = rec.id[:20] + "..." if len(rec.id) > 23 else rec.id
+            click.echo(
+                f"  {symbol} {id_display:<24} {status_text:<12} {expiry_text:<20} "
+                f"{error_info:<12} {last_used}{account}"
+            )
+
+            # Show token usage on second line if present
+            if token_info:
+                click.echo(f"      {rec.request_count} requests, {token_info} ({rec.prompt_tokens:,} in / {rec.completion_tokens:,} out)")

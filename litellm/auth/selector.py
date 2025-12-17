@@ -10,6 +10,8 @@ prioritizes:
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, List, Optional, Protocol, Sequence, Tuple
@@ -89,12 +91,42 @@ class CredentialSelector:
         disable_quota_cooldown: bool = False,
         provider_quota_cooldown_overrides: Optional[dict[str, bool]] = None,
         model_quota_cooldown_overrides: Optional[dict[str, bool]] = None,
+        offset_store_path: Optional[str] = None,
     ) -> None:
         self.alias_map = alias_map or ModelAliasMap()
-        self.provider_offsets: dict[str, int] = {}
+        self.offset_store_path = offset_store_path
+        self.provider_offsets: dict[str, int] = self._load_offsets()
         self.disable_quota_cooldown = disable_quota_cooldown
         self.provider_quota_cooldown_overrides = provider_quota_cooldown_overrides or {}
         self.model_quota_cooldown_overrides = model_quota_cooldown_overrides or {}
+
+    def _load_offsets(self) -> dict[str, int]:
+        """Load rotation offsets from file if configured."""
+        if not self.offset_store_path:
+            return {}
+        try:
+            if os.path.exists(self.offset_store_path):
+                with open(self.offset_store_path, "r") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        return {k: int(v) for k, v in data.items() if isinstance(v, int)}
+        except Exception:
+            pass
+        return {}
+
+    def _save_offsets(self) -> None:
+        """Persist rotation offsets to file if configured."""
+        if not self.offset_store_path:
+            return
+        try:
+            # Ensure parent directory exists
+            parent = os.path.dirname(self.offset_store_path)
+            if parent and not os.path.exists(parent):
+                os.makedirs(parent, exist_ok=True)
+            with open(self.offset_store_path, "w") as f:
+                json.dump(self.provider_offsets, f)
+        except Exception:
+            pass  # Best-effort persistence; don't fail requests
 
     def select(
         self,
@@ -208,6 +240,8 @@ class CredentialSelector:
 
         if not rotated:
             rotated = sorted(candidates, key=sort_key)
+        # Persist offset updates (best-effort)
+        self._save_offsets()
         return rotated[0]
 
     def mark_success(
