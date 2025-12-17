@@ -256,7 +256,7 @@ class AnthropicModelInfo(BaseLLMModelInfo):
 
     def get_anthropic_headers(
         self,
-        api_key: str,
+        api_key: Optional[str] = None,
         anthropic_version: Optional[str] = None,
         computer_tool_used: Optional[str] = None,
         prompt_caching_set: bool = False,
@@ -296,10 +296,11 @@ class AnthropicModelInfo(BaseLLMModelInfo):
 
         headers = {
             "anthropic-version": anthropic_version or "2023-06-01",
-            "x-api-key": api_key,
             "accept": "application/json",
             "content-type": "application/json",
         }
+        if api_key:
+            headers["x-api-key"] = api_key
 
         if user_anthropic_beta_headers is not None:
             betas.update(user_anthropic_beta_headers)
@@ -325,7 +326,9 @@ class AnthropicModelInfo(BaseLLMModelInfo):
         api_key: Optional[str] = None,
         api_base: Optional[str] = None,
     ) -> Dict:
-        if api_key is None:
+        auth_header = headers.get("Authorization") or headers.get("authorization")
+        has_bearer_auth = bool(auth_header)
+        if not api_key and not has_bearer_auth:
             raise litellm.AuthenticationError(
                 message="Missing Anthropic API Key - A call is being made to anthropic but no key is set either in the environment variables or via params. Please set `ANTHROPIC_API_KEY` in your environment vars",
                 llm_provider="anthropic",
@@ -352,7 +355,7 @@ class AnthropicModelInfo(BaseLLMModelInfo):
             computer_tool_used=computer_tool_used,
             prompt_caching_set=prompt_caching_set,
             pdf_used=pdf_used,
-            api_key=api_key,
+            api_key=None if has_bearer_auth else api_key,
             file_id_used=file_id_used,
             web_search_tool_used=web_search_tool_used,
             is_vertex_request=optional_params.get("is_vertex_request", False),

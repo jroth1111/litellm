@@ -14,5 +14,11 @@
   "helicone": {
     "base_url": "https://ai-gateway.helicone.ai/",
     "api_key_env": "HELICONE_API_KEY"
+  },
+  "cursor": {
+    "base_url": "https://api2.cursor.sh/hf/v1",
+    "api_key_env": "CURSOR_API_KEY",
+    "api_base_env": "CURSOR_API_BASE",
+    "base_class": "openai_gpt"
   }
 }

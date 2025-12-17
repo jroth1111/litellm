@@ -122,7 +122,7 @@ mlflow = ["mlflow"]
 profile = "black"
 
 [tool.poetry.scripts]
-litellm = 'litellm:run_server'
+litellm = 'litellm.cli:main'
 litellm-proxy = 'litellm.proxy.client.cli:cli'
 
 [tool.poetry.group.dev.dependencies]

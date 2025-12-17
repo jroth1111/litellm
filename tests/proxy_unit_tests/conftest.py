@@ -3,12 +3,12 @@
 import importlib
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
-sys.path.insert(
-    0, os.path.abspath("../..")
-)  # Adds the parent directory to the system path
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))  # Ensure repo root is importable regardless of CWD.
 import litellm
 
 
@@ -18,9 +18,7 @@ def setup_and_teardown():
     This fixture reloads litellm before every function. To speed up testing by removing callbacks being chained.
     """
     curr_dir = os.getcwd()  # Get the current working directory
-    sys.path.insert(
-        0, os.path.abspath("../..")
-    )  # Adds the project directory to the system path
+    sys.path.insert(0, str(ROOT))  # Adds the project directory to the system path
 
     import litellm
     from litellm import Router

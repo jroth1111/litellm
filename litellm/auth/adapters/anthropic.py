@@ -1,0 +1,98 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional
+
+from ..core import AuthRecord, AuthStatus, RequestContext
+from .base import AdapterCapabilities
+from .llms_oauth_loader import load_module
+from .utils import token_dataclass_to_metadata
+
+
+class AnthropicSubscriptionAdapter:
+    provider = "anthropic"
+    supports_refresh = True
+    refresh_lead_default = timedelta(minutes=5)
+    capabilities = AdapterCapabilities(
+        login_flow="browser_pkce",
+        supports_refresh=True,
+        supports_models_list=False,
+    )
+
+    @staticmethod
+    def _oauth():
+        return load_module(
+            "llms/anthropic/claude_oauth.py",
+            "litellm.auth.adapters._anthropic_claude_oauth",
+        )
+
+    @property
+    def default_redirect_uri(self) -> str:
+        return str(self._oauth().ANTHROPIC_REDIRECT_URI)
+
+    def authorize_url(
+        self, *, state: str, code_challenge: str, redirect_uri: str
+    ) -> str:
+        return str(
+            self._oauth().generate_auth_url(
+                state=state, code_challenge=code_challenge, redirect_uri=redirect_uri
+            )
+        )
+
+    def exchange_code(
+        self,
+        *,
+        code: str,
+        code_verifier: str,
+        state: str,
+        expected_state: Optional[str],
+        redirect_uri: str,
+    ) -> Dict[str, Any]:
+        tokens = self._oauth().exchange_code_for_tokens(
+            code=code,
+            code_verifier=code_verifier,
+            state=state,
+            expected_state=expected_state,
+            redirect_uri=redirect_uri,
+        )
+        return token_dataclass_to_metadata(tokens)
+
+    def supports(self, model: str) -> bool:
+        lowered = (model or "").lower()
+        return lowered.startswith("anthropic/") or "claude" in lowered
+
+    def prepare(
+        self, headers: Dict[str, str], ctx: RequestContext, auth: AuthRecord
+    ) -> Dict[str, str]:
+        token = auth.metadata.get("access_token")
+        if not token:
+            raise ValueError("missing access_token for anthropic subscription")
+        new_headers = dict(headers)
+        new_headers["Authorization"] = f"Bearer {token}"
+        return new_headers
+
+    def expiration(self, auth: AuthRecord) -> Optional[datetime]:
+        return auth.expiration_time()
+
+    def refresh_lead(self, auth: AuthRecord) -> Optional[timedelta]:
+        return self.refresh_lead_default
+
+    def refresh(self, auth: AuthRecord, ctx: RequestContext) -> AuthRecord:
+        refresh_token = auth.metadata.get("refresh_token")
+        if not refresh_token:
+            raise ValueError("missing refresh_token for anthropic subscription")
+
+        token = self._oauth().refresh_tokens(
+            refresh_token=refresh_token,
+            token_url=auth.attributes.get("token_url"),
+            client_id=auth.attributes.get("client_id"),
+            client_secret=auth.attributes.get("client_secret"),
+        )
+        updated = auth.clone()
+        updated.metadata.update(token_dataclass_to_metadata(token))
+        updated.last_refreshed_at = datetime.now(timezone.utc)
+        updated.status = AuthStatus.ACTIVE
+        updated.unavailable = False
+        updated.status_message = ""
+        return updated
+

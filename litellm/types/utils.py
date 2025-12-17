@@ -2967,6 +2967,7 @@ class LlmProviders(str, Enum):
     EMPOWER = "empower"
     GITHUB = "github"
     RAGFLOW = "ragflow"
+    CURSOR = "cursor"
     COMPACTIFAI = "compactifai"
     DOCKER_MODEL_RUNNER = "docker_model_runner"
     CUSTOM = "custom"

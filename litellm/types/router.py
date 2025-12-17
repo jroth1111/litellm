@@ -428,6 +428,7 @@ class DeploymentTypedDict(TypedDict, total=False):
     model_name: Required[str]
     litellm_params: Required[LiteLLMParamsTypedDict]
     model_info: dict
+    auth_mode: Literal["auto", "subscription", "api_key", "none"]
 
 
 SPECIAL_MODEL_INFO_PARAMS = [

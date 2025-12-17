@@ -415,6 +415,7 @@ LITELLM_CHAT_PROVIDERS = [
     "ovhcloud",
     "lemonade",
     "docker_model_runner",
+    "cursor",
     "amazon_nova",
 ]
 
@@ -610,6 +611,7 @@ openai_compatible_providers: List = [
     "cometapi",
     "clarifai",
     "docker_model_runner",
+    "cursor",
     "ragflow",
 ]
 openai_text_completion_compatible_providers: List = (
