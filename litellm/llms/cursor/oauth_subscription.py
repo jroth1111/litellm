@@ -51,6 +51,30 @@ CURSOR_REFRESH_URL = os.getenv(
 )
 
 
+def _resolve_proxy_url(explicit_proxy: Optional[str] = None) -> Optional[str]:
+    """
+    Resolve proxy URL from explicit parameter or environment variables.
+
+    Priority: explicit param > LITELLM_OAUTH_PROXY > HTTPS_PROXY > HTTP_PROXY.
+    """
+    if explicit_proxy:
+        return explicit_proxy.strip() if explicit_proxy.strip() else None
+    for var in ("LITELLM_OAUTH_PROXY", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        val = os.getenv(var, "").strip()
+        if val:
+            return val
+    return None
+
+
+def _build_client(timeout: float = 30.0, proxy: Optional[str] = None) -> httpx.Client:
+    """Build an httpx.Client with optional proxy support."""
+    proxy_url = _resolve_proxy_url(proxy)
+    if proxy_url:
+        logger.debug("cursor_using_proxy", extra={"proxy": proxy_url.split("@")[-1]})
+        return httpx.Client(timeout=timeout, proxy=proxy_url)
+    return httpx.Client(timeout=timeout)
+
+
 @dataclass
 class CursorLoginSession:
     """Ephemeral session details for a Cursor device-link login."""
@@ -124,11 +148,20 @@ def poll_for_token(
     max_attempts: int = 600,
     interval_seconds: float = 1.5,
     timeout: float = 30.0,
+    proxy: Optional[str] = None,
 ) -> CursorTokenData:
     """
     Poll Cursor /auth/poll until user authorizes the session.
 
     Cursor returns 404 or 401 while pending; these are ignored.
+
+    Args:
+        session: The login session from start_cursor_login.
+        max_wait_seconds: Maximum time to wait (overrides max_attempts).
+        max_attempts: Maximum poll attempts.
+        interval_seconds: Delay between polls.
+        timeout: HTTP request timeout.
+        proxy: Proxy URL (optional, falls back to env vars).
     """
     params = {"uuid": session.uuid, "verifier": session.verifier}
     effective_attempts = max_attempts
@@ -140,7 +173,7 @@ def poll_for_token(
         if wait > 0 and interval_seconds > 0:
             # Make max_wait_seconds authoritative when provided.
             effective_attempts = max(1, int((wait / interval_seconds) + 1))
-    with httpx.Client(timeout=timeout) as client:
+    with _build_client(timeout=timeout, proxy=proxy) as client:
         for attempt in range(effective_attempts):
             resp = client.get(
                 CURSOR_POLL_URL,
@@ -201,14 +234,21 @@ def refresh_tokens(
     timeout: float = 30.0,
     *,
     token_url: Optional[str] = None,
+    proxy: Optional[str] = None,
 ) -> CursorTokenData:
     """
     Refresh Cursor access token using refresh token.
+
+    Args:
+        refresh_token: The refresh token from a previous authorization.
+        timeout: HTTP request timeout.
+        token_url: Override token endpoint URL.
+        proxy: Proxy URL (optional, falls back to env vars).
     """
     if not refresh_token:
         raise CursorAuthError("refresh_failed", "missing refresh_token")
 
-    with httpx.Client(timeout=timeout) as client:
+    with _build_client(timeout=timeout, proxy=proxy) as client:
         resp = client.post(
             token_url or CURSOR_REFRESH_URL,
             json={"refresh_token": refresh_token},

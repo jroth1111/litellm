@@ -2625,23 +2625,89 @@ class Router:
         """
         Refresh token if expiry is near or refresh explicitly needed.
         """
-        try:
-            refreshed = strategy.refresh(auth_ctx.selection.auth, ctx)
-            if auth_ctx.store and auth_ctx.namespace:
-                auth_ctx.store.save(auth_ctx.namespace, refreshed)
+        store = auth_ctx.store
+        namespace = auth_ctx.namespace
+        auth_id = auth_ctx.selection.auth.id
+        provider_model = auth_ctx.selection.provider_model
+
+        def _refresh_and_persist(current_auth: AuthRecord) -> AuthRecord:
+            verbose_router_logger.debug(
+                f"[auth] refresh start provider={current_auth.provider} id={current_auth.id} model={provider_model}"
+            )
+            refreshed = strategy.refresh(current_auth, ctx)
+            if store and namespace:
+                store.save(namespace, refreshed)
             self._update_auth_records_cache(
-                store=auth_ctx.store, namespace=auth_ctx.namespace, record=refreshed
+                store=store, namespace=namespace, record=refreshed
             )
             try:
                 self.auth_hooks.on_update(refreshed, reason="refresh")
             except Exception as hook_err:
                 verbose_router_logger.debug(f"auth hook on_update failed: {hook_err}")
+            verbose_router_logger.debug(
+                f"[auth] refresh success provider={refreshed.provider} id={refreshed.id} model={provider_model}"
+            )
+            return refreshed
+
+        # Best-effort refresh deduplication: if the store supports locking,
+        # ensure only one worker refreshes a given auth record at a time.
+        if store is not None and namespace and hasattr(store, "lock"):
+            try:
+                lock_cm = getattr(store, "lock")
+                with lock_cm(namespace, auth_id, timeout_seconds=5.0) as acquired:  # type: ignore[misc]
+                    if acquired:
+                        latest = store.get(namespace, auth_id)
+                        if latest is not None:
+                            # Another worker may have already refreshed.
+                            if (
+                                latest.updated_at
+                                and latest.updated_at
+                                > auth_ctx.selection.auth.updated_at
+                            ) or (
+                                latest.last_refreshed_at
+                                and (
+                                    auth_ctx.selection.auth.last_refreshed_at is None
+                                    or latest.last_refreshed_at
+                                    > auth_ctx.selection.auth.last_refreshed_at
+                                )
+                            ):
+                                verbose_router_logger.debug(
+                                    f"[auth] refresh dedup hit provider={latest.provider} id={latest.id} model={provider_model}"
+                                )
+                                self._update_auth_records_cache(
+                                    store=store, namespace=namespace, record=latest
+                                )
+                                return _AuthSelectionCtx(
+                                    selection=type(auth_ctx.selection)(
+                                        auth=latest,
+                                        provider_model=auth_ctx.selection.provider_model,
+                                    ),
+                                    store=store,
+                                    namespace=namespace,
+                                )
+                            refreshed = _refresh_and_persist(
+                                auth_ctx.selection.auth
+                            )
+                            return _AuthSelectionCtx(
+                                selection=type(auth_ctx.selection)(
+                                    auth=refreshed,
+                                    provider_model=auth_ctx.selection.provider_model,
+                                ),
+                                store=store,
+                                namespace=namespace,
+                            )
+            except Exception as e:
+                # If locking fails, fall back to refresh without lock.
+                verbose_router_logger.debug(f"auth refresh lock failed: {str(e)}")
+
+        try:
+            refreshed = _refresh_and_persist(auth_ctx.selection.auth)
             return _AuthSelectionCtx(
                 selection=type(auth_ctx.selection)(
                     auth=refreshed, provider_model=auth_ctx.selection.provider_model
                 ),
-                store=auth_ctx.store,
-                namespace=auth_ctx.namespace,
+                store=store,
+                namespace=namespace,
             )
         except Exception as e:
             verbose_router_logger.debug(f"auth refresh failed: {str(e)}")

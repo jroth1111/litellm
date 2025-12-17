@@ -25,6 +25,7 @@ Usage:
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
@@ -35,6 +36,7 @@ import logging
 import httpx
 
 from litellm.auth.provider_http import http_post_with_retry
+from litellm.auth.provider_http import http_get_with_retry
 
 logger = logging.getLogger("litellm.auth.oauth.openai")
 
@@ -45,6 +47,32 @@ OPENAI_CLIENT_ID = os.getenv("OPENAI_CLIENT_ID", "app_EMoamEEZ73f0CkXaXp7hrann")
 OPENAI_REDIRECT_URI = os.getenv("OPENAI_REDIRECT_URI", "http://localhost:1455/auth/callback")
 OPENAI_SCOPES = os.getenv("OPENAI_SCOPES", "openid email profile offline_access")
 OPENAI_EXPECTED_ISSUER = os.getenv("OPENAI_EXPECTED_ISSUER", "https://auth.openai.com")
+OPENAI_JWKS_URL = os.getenv("OPENAI_JWKS_URL", f"{OPENAI_EXPECTED_ISSUER}/.well-known/jwks.json")
+
+_JWKS_CACHE: dict[str, tuple[float, dict]] = {}
+
+
+def _fetch_jwks(*, jwks_url: str, timeout: float = 10.0, cache_ttl_seconds: int = 3600) -> dict:
+    now = time.time()
+    cached = _JWKS_CACHE.get(jwks_url)
+    if cached is not None:
+        cached_at, jwks = cached
+        if now - cached_at < cache_ttl_seconds:
+            return jwks
+    resp = http_get_with_retry(
+        jwks_url,
+        headers={"Accept": "application/json"},
+        timeout=timeout,
+        max_attempts=2,
+        backoff_seconds=0.2,
+        max_backoff_seconds=2.0,
+    )
+    resp.raise_for_status()
+    jwks = resp.json()
+    if not isinstance(jwks, dict) or "keys" not in jwks:
+        raise OpenAIAuthError("jwks_invalid", "JWKS response missing keys")
+    _JWKS_CACHE[jwks_url] = (now, jwks)
+    return jwks
 
 
 @dataclass
@@ -328,12 +356,57 @@ def verify_id_token(
     leeway_seconds: int = 60,
 ) -> bool:
     """
-    Lightweight, best-effort ID token verification (no signature verification).
-    Checks exp/iss/aud claims if present.
+    Best-effort ID token verification.
+
+    - If PyJWT is available, verifies signature using JWKS (RFC 7517) and checks
+      iss/aud/exp with leeway.
+    - Otherwise falls back to claim-only validation (no signature verification).
+
+    This function is intentionally non-throwing: callers should treat False as
+    "unverified" and avoid relying on claims for security decisions.
     """
+    try:
+        import jwt  # type: ignore
+
+        try:
+            header = jwt.get_unverified_header(id_token)
+            kid = header.get("kid")
+            alg = header.get("alg")
+        except Exception:
+            header = {}
+            kid = None
+            alg = None
+
+        if kid and alg:
+            jwks = _fetch_jwks(jwks_url=OPENAI_JWKS_URL)
+            keys = jwks.get("keys") or []
+            key_obj = None
+            for k in keys:
+                if isinstance(k, dict) and k.get("kid") == kid:
+                    key_obj = k
+                    break
+            if key_obj is None:
+                return False
+
+            public_key = jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(key_obj))
+            jwt.decode(
+                id_token,
+                key=public_key,
+                algorithms=[alg],
+                audience=expected_audience,
+                issuer=expected_issuer,
+                leeway=leeway_seconds,
+                options={"require": ["exp"]},
+            )
+            return True
+    except Exception:
+        # PyJWT unavailable or verification failed; fall back to claim-only.
+        pass
+
     try:
         import base64
         import json as json_module
+
         parts = id_token.split(".")
         if len(parts) < 2:
             return False

@@ -251,6 +251,20 @@ async def register_client_with_server(
         "redirect_uris": [f"{request_base_url}/callback"],
     }
 
+    # Parity with OpenCode: if dynamic registration returned an expiring client secret,
+    # clear it when expired so the next call triggers re-registration.
+    try:
+        info = (mcp_server.mcp_info or {}) if hasattr(mcp_server, "mcp_info") else {}
+        expires_at = info.get("client_secret_expires_at")
+        if expires_at:
+            import time as _time
+
+            if float(expires_at) > 0 and float(expires_at) <= _time.time():
+                mcp_server.client_id = None
+                mcp_server.client_secret = None
+    except Exception:
+        pass
+
     if mcp_server.client_id and mcp_server.client_secret:
         return dummy_return
 
@@ -285,6 +299,29 @@ async def register_client_with_server(
     response.raise_for_status()
 
     token_response = response.json()
+
+    # Best-effort cache of dynamic registration metadata on the server object.
+    # MCPServer's mcp_info field allows arbitrary metadata.
+    try:
+        if mcp_server.mcp_info is None:
+            mcp_server.mcp_info = {}
+        if isinstance(token_response, dict):
+            for key in (
+                "client_id",
+                "client_secret",
+                "client_secret_expires_at",
+                "client_id_issued_at",
+                "token_endpoint_auth_method",
+            ):
+                if key in token_response and token_response[key] is not None:
+                    mcp_server.mcp_info[key] = token_response[key]
+            # mirror into top-level convenience fields if present
+            if token_response.get("client_id"):
+                mcp_server.client_id = str(token_response["client_id"])
+            if token_response.get("client_secret"):
+                mcp_server.client_secret = str(token_response["client_secret"])
+    except Exception:
+        pass
 
     return JSONResponse(token_response)
 

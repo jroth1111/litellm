@@ -30,7 +30,32 @@ from typing import Any, Dict, Optional
 
 import httpx
 
+from litellm.auth.provider_http import http_get_with_retry, http_post_with_retry
 from litellm.auth.core import AuthRecord, RequestContext
+
+
+def _resolve_proxy_url(explicit_proxy: Optional[str] = None) -> Optional[str]:
+    """
+    Resolve proxy URL from explicit parameter or environment variables.
+
+    Priority: explicit param > LITELLM_OAUTH_PROXY > HTTPS_PROXY > HTTP_PROXY.
+    """
+    if explicit_proxy:
+        return explicit_proxy.strip() if explicit_proxy.strip() else None
+    for var in ("LITELLM_OAUTH_PROXY", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        val = os.getenv(var, "").strip()
+        if val:
+            return val
+    return None
+
+
+def _build_client(timeout: float = 30.0, proxy: Optional[str] = None) -> httpx.Client:
+    """Build an httpx.Client with optional proxy support."""
+    proxy_url = _resolve_proxy_url(proxy)
+    if proxy_url:
+        logger.debug("copilot_using_proxy", extra={"proxy": proxy_url.split("@")[-1]})
+        return httpx.Client(timeout=timeout, proxy=proxy_url)
+    return httpx.Client(timeout=timeout)
 
 # OAuth constants from CLIProxyAPIPlus with env overrides
 COPILOT_CLIENT_ID = os.getenv("COPILOT_CLIENT_ID", "Iv1.b507a08c87ecfe98")
@@ -90,20 +115,20 @@ def request_device_code(timeout: float = 30.0) -> DeviceCodeResponse:
         "scope": COPILOT_DEFAULT_SCOPE,
     }
     
-    with httpx.Client(timeout=timeout) as client:
-        resp = client.post(
-            COPILOT_DEVICE_CODE_URL,
-            data=data,
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "application/json",
-            },
+    resp = http_post_with_retry(
+        COPILOT_DEVICE_CODE_URL,
+        data=data,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        },
+        timeout=timeout,
+    )
+    if resp.status_code < 200 or resp.status_code >= 300:
+        raise CopilotAuthError(
+            "device_code_failed", f"HTTP {resp.status_code}: {resp.text}"
         )
-        
-        if resp.status_code < 200 or resp.status_code >= 300:
-            raise CopilotAuthError("device_code_failed", f"HTTP {resp.status_code}: {resp.text}")
-        
-        result = resp.json()
+    result = resp.json()
     
     return DeviceCodeResponse(
         device_code=result["device_code"],
@@ -147,58 +172,58 @@ def poll_for_token(
             raise CopilotAuthError("timeout", "Polling timed out waiting for authorization")
         deadline = min(deadline, now + max_wait)
     
-    # Reuse a single client to benefit from connection pooling.
-    with httpx.Client(timeout=timeout) as client:
-        while time.time() < deadline:
-            data = {
-                "client_id": COPILOT_CLIENT_ID,
-                "device_code": device_code.device_code,
-                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-            }
+    while time.time() < deadline:
+        data = {
+            "client_id": COPILOT_CLIENT_ID,
+            "device_code": device_code.device_code,
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+        }
 
-            resp = client.post(
-                COPILOT_TOKEN_URL,
-                data=data,
-                headers={
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "Accept": "application/json",
-                },
+        resp = http_post_with_retry(
+            COPILOT_TOKEN_URL,
+            data=data,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+            },
+            timeout=timeout,
+            max_attempts=1,  # polling loop handles retry/backoff semantics
+        )
+
+        result = resp.json()
+
+        # Check for OAuth errors
+        if "error" in result:
+            error = result["error"]
+            error_desc = result.get("error_description", "")
+
+            if error == "authorization_pending":
+                logger.debug("copilot_authorization_pending", extra={"attempt_interval": poll_interval})
+                time.sleep(poll_interval)
+                continue
+            elif error == "slow_down":
+                poll_interval += 5
+                logger.debug("copilot_slow_down", extra={"next_interval": poll_interval})
+                time.sleep(poll_interval)
+                continue
+            elif error == "expired_token":
+                logger.warning("copilot_expired_token")
+                raise CopilotAuthError("expired_token", "Device code expired")
+            elif error == "access_denied":
+                logger.warning("copilot_access_denied")
+                raise CopilotAuthError("access_denied", "User denied authorization")
+            else:
+                raise CopilotAuthError(error, error_desc)
+
+        # Success
+        if "access_token" in result:
+            return CopilotTokenData(
+                access_token=result["access_token"],
+                token_type=result.get("token_type", "Bearer"),
+                scope=result.get("scope", ""),
             )
-        
-            result = resp.json()
-        
-            # Check for OAuth errors
-            if "error" in result:
-                error = result["error"]
-                error_desc = result.get("error_description", "")
 
-                if error == "authorization_pending":
-                    logger.debug("copilot_authorization_pending", extra={"attempt_interval": poll_interval})
-                    time.sleep(poll_interval)
-                    continue
-                elif error == "slow_down":
-                    poll_interval += 5
-                    logger.debug("copilot_slow_down", extra={"next_interval": poll_interval})
-                    time.sleep(poll_interval)
-                    continue
-                elif error == "expired_token":
-                    logger.warning("copilot_expired_token")
-                    raise CopilotAuthError("expired_token", "Device code expired")
-                elif error == "access_denied":
-                    logger.warning("copilot_access_denied")
-                    raise CopilotAuthError("access_denied", "User denied authorization")
-                else:
-                    raise CopilotAuthError(error, error_desc)
-        
-            # Success
-            if "access_token" in result:
-                return CopilotTokenData(
-                    access_token=result["access_token"],
-                    token_type=result.get("token_type", "Bearer"),
-                    scope=result.get("scope", ""),
-                )
-        
-            time.sleep(poll_interval)
+        time.sleep(poll_interval)
     
     raise CopilotAuthError("timeout", "Polling timed out waiting for authorization")
 
@@ -217,20 +242,18 @@ def fetch_user_info(access_token: str, timeout: float = 30.0) -> str:
     Raises:
         CopilotAuthError: If the user info request fails.
     """
-    with httpx.Client(timeout=timeout) as client:
-        resp = client.get(
-            COPILOT_USER_INFO_URL,
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Accept": "application/json",
-                "User-Agent": "LiteLLM",
-            },
-        )
-        
-        if resp.status_code != 200:
-            raise CopilotAuthError("user_info_failed", f"HTTP {resp.status_code}")
-        
-        result = resp.json()
+    resp = http_get_with_retry(
+        COPILOT_USER_INFO_URL,
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+            "User-Agent": "LiteLLM",
+        },
+        timeout=timeout,
+    )
+    if resp.status_code != 200:
+        raise CopilotAuthError("user_info_failed", f"HTTP {resp.status_code}")
+    result = resp.json()
     
     username = result.get("login")
     if not username:
@@ -253,12 +276,21 @@ def post(
     json_body: Dict[str, Any],
     timeout: float = 30.0,
     ctx: Optional[RequestContext] = None,
+    proxy: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Execute a Copilot API call using the subscription access token.
+
+    Args:
+        auth: AuthRecord with access token in metadata.
+        url: API endpoint URL.
+        json_body: JSON request body.
+        timeout: HTTP request timeout.
+        ctx: Request context (optional).
+        proxy: Proxy URL (optional, falls back to env vars).
     """
     headers = _auth_headers(auth)
-    with httpx.Client(timeout=timeout) as client:
+    with _build_client(timeout=timeout, proxy=proxy) as client:
         resp = client.post(url, json=json_body, headers=headers)
         resp.raise_for_status()
         return resp.json()

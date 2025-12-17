@@ -27,7 +27,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 
 import httpx
@@ -61,6 +61,12 @@ class AnthropicTokenData:
     email: Optional[str] = None
     organization_uuid: Optional[str] = None
     organization_name: Optional[str] = None
+    # Enhanced metadata fields (optional, extracted if present in response)
+    subscription_tier: Optional[str] = None  # e.g., "free", "pro", "team"
+    plan: Optional[str] = None
+    account_type: Optional[str] = None
+    features: Optional[List[str]] = None  # List of enabled features
+    limits: Optional[Dict[str, Any]] = None  # Rate limits, quotas, etc.
 
 
 class AnthropicAuthError(Exception):
@@ -110,6 +116,7 @@ def exchange_code_for_tokens(
     expected_state: Optional[str] = None,
     redirect_uri: str = ANTHROPIC_REDIRECT_URI,
     timeout: float = 30.0,
+    expires_in_override: Optional[int] = None,
 ) -> AnthropicTokenData:
     """
     Exchange an authorization code for access and refresh tokens.
@@ -121,6 +128,8 @@ def exchange_code_for_tokens(
         expected_state: If provided, validate that `state` matches this value.
         redirect_uri: The redirect URI used in the authorization request.
         timeout: HTTP request timeout.
+        expires_in_override: Override expires_in from response (seconds). Useful for
+            long-lived tokens in specific deployments.
     
     Returns:
         AnthropicTokenData with access token and refresh token.
@@ -169,16 +178,29 @@ def exchange_code_for_tokens(
     if not result.get("access_token"):
         raise AnthropicAuthError("token_exchange_failed", "No access_token in response")
     
-    # Calculate expiry
+    # Calculate expiry (use override if provided)
     expires_at = None
-    if "expires_in" in result:
+    expires_in = expires_in_override or result.get("expires_in")
+    if expires_in is not None:
         expires_at = (
-            datetime.now(timezone.utc) + timedelta(seconds=int(result["expires_in"]))
+            datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
         ).isoformat()
     
     # Extract organization and account info
     org = result.get("organization", {})
     account = result.get("account", {})
+    
+    # Extract enhanced subscription/plan metadata if present
+    # Reference: claude-relay-service oauthHelper.js
+    subscription_tier = (
+        result.get("subscription_tier")
+        or result.get("tier")
+        or account.get("subscription_tier")
+    )
+    plan = result.get("plan") or account.get("plan")
+    account_type = result.get("account_type") or account.get("type")
+    features = result.get("features") if isinstance(result.get("features"), list) else None
+    limits = result.get("limits") if isinstance(result.get("limits"), dict) else None
     
     return AnthropicTokenData(
         access_token=result["access_token"],
@@ -188,6 +210,11 @@ def exchange_code_for_tokens(
         email=account.get("email_address"),
         organization_uuid=org.get("uuid"),
         organization_name=org.get("name"),
+        subscription_tier=subscription_tier,
+        plan=plan,
+        account_type=account_type,
+        features=features,
+        limits=limits,
     )
 
 

@@ -40,6 +40,21 @@ def _safe_label(value: Optional[str]) -> str:
     return (value or "").strip()
 
 
+def _is_valid_redirect_url(url: Optional[str]) -> bool:
+    """
+    Validate URL to prevent XSS in OAuth callback pages.
+
+    Only allows http:// and https:// URLs. Rejects javascript:, data:,
+    and other potentially dangerous schemes.
+
+    Reference: CLIProxyAPIPlus oauth_server.go isValidURL()
+    """
+    if not url or not isinstance(url, str):
+        return False
+    url = url.strip()
+    return url.startswith("https://") or url.startswith("http://")
+
+
 def _parse_redirect_uri(redirect_uri: str) -> Tuple[str, int, str]:
     parsed = urllib.parse.urlparse(redirect_uri)
     host = parsed.hostname or "127.0.0.1"
@@ -65,6 +80,50 @@ def _wait_for_oauth_callback(
     expected_state: str,
     timeout_seconds: int = 600,
 ) -> str:
+    httpd, thread, result, done, _actual = _start_oauth_callback_server(
+        redirect_uri=redirect_uri, expected_state=expected_state
+    )
+    try:
+        if not done.wait(timeout_seconds):
+            raise click.ClickException(
+                f"Timed out waiting for OAuth callback on {redirect_uri}"
+            )
+    finally:
+        try:
+            httpd.shutdown()
+        except Exception:
+            pass
+        try:
+            httpd.server_close()
+        except Exception:
+            pass
+        try:
+            thread.join(timeout=1)
+        except Exception:
+            pass
+
+    if result.error:
+        detail = result.error_description or ""
+        raise click.ClickException(f"OAuth error: {result.error} {detail}".strip())
+    if not result.code:
+        raise click.ClickException("OAuth callback missing `code` parameter")
+    if not result.state:
+        raise click.ClickException("OAuth callback missing `state` parameter")
+    if result.state != expected_state:
+        raise click.ClickException("OAuth state mismatch")
+    return result.code
+
+
+def _start_oauth_callback_server(
+    redirect_uri: str,
+    expected_state: str,
+) -> tuple[HTTPServer, threading.Thread, _CallbackResult, threading.Event, str]:
+    """
+    Start the local HTTP callback server and return its runtime components.
+
+    Supports `redirect_uri` with port 0 to bind an ephemeral port (RFC 8252-style
+    loopback). This is opt-in; default provider redirects remain unchanged.
+    """
     host, port, expected_path = _parse_redirect_uri(redirect_uri)
     result = _CallbackResult()
     done = threading.Event()
@@ -126,7 +185,6 @@ def _wait_for_oauth_callback(
             done.set()
 
         def log_message(self, format: str, *args):  # noqa: A002
-            # quiet
             return
 
     class ReuseHTTPServer(HTTPServer):
@@ -139,33 +197,22 @@ def _wait_for_oauth_callback(
             f"Failed to bind callback server on {host}:{port}: {e}"
         ) from e
 
+    actual_host, actual_port = httpd.server_address[:2]
+    parsed = urllib.parse.urlparse(redirect_uri)
+    actual_redirect_uri = urllib.parse.urlunparse(
+        (
+            parsed.scheme or "http",
+            f"{actual_host}:{actual_port}",
+            expected_path,
+            "",
+            "",
+            "",
+        )
+    )
+
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
-    try:
-        if not done.wait(timeout_seconds):
-            raise click.ClickException(
-                f"Timed out waiting for OAuth callback on {redirect_uri}"
-            )
-    finally:
-        try:
-            httpd.shutdown()
-        except Exception:
-            pass
-        try:
-            httpd.server_close()
-        except Exception:
-            pass
-
-    if result.error:
-        detail = result.error_description or ""
-        raise click.ClickException(f"OAuth error: {result.error} {detail}".strip())
-    if not result.code:
-        raise click.ClickException("OAuth callback missing `code` parameter")
-    if not result.state:
-        raise click.ClickException("OAuth callback missing `state` parameter")
-    if result.state != expected_state:
-        raise click.ClickException("OAuth state mismatch")
-    return result.code
+    return httpd, thread, result, done, actual_redirect_uri
 
 
 def _save_auth(
@@ -309,6 +356,11 @@ def auth_cli() -> None:
 @click.option("--redirect-uri", default=None, help="Override redirect URI for browser flows")
 @click.option("--no-open-browser", is_flag=True, default=False, help="Print URL only (do not open browser)")
 @click.option("--timeout", "timeout_seconds", default=600, type=int, show_default=True, help="Callback/device flow timeout seconds")
+@click.option(
+    "--session-key",
+    default=None,
+    help="(Anthropic only) Use existing browser session key instead of full OAuth flow.",
+)
 def login(
     provider: str,
     store_dir: str,
@@ -321,6 +373,7 @@ def login(
     redirect_uri: Optional[str],
     no_open_browser: bool,
     timeout_seconds: int,
+    session_key: Optional[str],
 ) -> None:
     """
     Login using an OAuth subscription flow and persist the resulting token(s).
@@ -349,7 +402,42 @@ def login(
     login_flow = getattr(getattr(adapter, "capabilities", None), "login_flow", None)
     metadata: Dict[str, Any]
 
-    if login_flow == "device_code":
+    # Handle session-key based login for Anthropic (cookie-based OAuth fallback)
+    if session_key and provider_key == "anthropic":
+        try:
+            from litellm.llms.anthropic.cookie_oauth import (
+                get_organizations,
+                authorize_with_cookie,
+                CookieAuthError,
+            )
+            click.echo("Using session key for cookie-based authentication...")
+            orgs = get_organizations(session_key)
+            if len(orgs) > 1:
+                click.echo("Available organizations:")
+                for i, org in enumerate(orgs):
+                    click.echo(f"  {i + 1}. {org.name} ({org.uuid})")
+                # Use first org by default, could add --org-uuid option later
+                click.echo(f"Using: {orgs[0].name}")
+            result = authorize_with_cookie(
+                session_key=session_key,
+                organization_uuid=orgs[0].uuid,
+            )
+            metadata = {
+                "access_token": result.access_token,
+                "refresh_token": result.refresh_token,
+                "token_type": result.token_type,
+                "expires_at": result.expires_at,
+                "organization_uuid": result.organization_uuid,
+                "organization_name": result.organization_name,
+                "email": result.email,
+            }
+        except Exception as e:
+            raise click.ClickException(f"Cookie-based auth failed: {e}") from e
+    elif session_key:
+        raise click.ClickException(
+            f"--session-key is only supported for Anthropic, not {provider}"
+        )
+    elif login_flow == "device_code":
         device = adapter.device_authorize()  # type: ignore[attr-defined]
         url = getattr(device, "verification_uri_complete", None) or getattr(
             device, "verification_uri", None
@@ -381,20 +469,72 @@ def login(
         state = generate_state()
         code_verifier, code_challenge = generate_pkce_pair()
         redirect = redirect_uri or getattr(adapter, "default_redirect_uri")
+        # Optional RFC 8252 loopback behavior: if the operator supplies a redirect
+        # URI with port 0 (e.g., http://127.0.0.1:0/callback), bind an ephemeral port
+        # first, then use the actual redirect URI for the authorize+exchange calls.
+        actual_redirect = redirect
+        callback_server = None
+        callback_thread = None
+        callback_result = None
+        callback_done = None
+        try:
+            _, port, _ = _parse_redirect_uri(redirect)
+            if port == 0:
+                (
+                    callback_server,
+                    callback_thread,
+                    callback_result,
+                    callback_done,
+                    actual_redirect,
+                ) = _start_oauth_callback_server(
+                    redirect_uri=redirect, expected_state=state
+                )
+        except Exception:
+            callback_server = None
+
         auth_url = adapter.authorize_url(  # type: ignore[attr-defined]
-            state=state, code_challenge=code_challenge, redirect_uri=redirect
+            state=state, code_challenge=code_challenge, redirect_uri=actual_redirect
         )
         _maybe_open_browser(str(auth_url), open_browser=open_browser)
-        code = _wait_for_oauth_callback(
-            redirect, expected_state=state, timeout_seconds=timeout_seconds
-        )
+        if callback_server is not None and callback_done is not None and callback_result is not None:
+            try:
+                if not callback_done.wait(timeout_seconds):
+                    raise click.ClickException(
+                        f"Timed out waiting for OAuth callback on {actual_redirect}"
+                    )
+            finally:
+                try:
+                    callback_server.shutdown()
+                except Exception:
+                    pass
+                try:
+                    callback_server.server_close()
+                except Exception:
+                    pass
+                if callback_thread is not None:
+                    try:
+                        callback_thread.join(timeout=1)
+                    except Exception:
+                        pass
+            if callback_result.error:
+                detail = callback_result.error_description or ""
+                raise click.ClickException(
+                    f"OAuth error: {callback_result.error} {detail}".strip()
+                )
+            if not callback_result.code:
+                raise click.ClickException("OAuth callback missing `code` parameter")
+            code = callback_result.code
+        else:
+            code = _wait_for_oauth_callback(
+                actual_redirect, expected_state=state, timeout_seconds=timeout_seconds
+            )
         try:
             metadata = adapter.exchange_code(  # type: ignore[attr-defined]
                 code=code,
                 code_verifier=code_verifier,
                 state=state,
                 expected_state=state,
-                redirect_uri=redirect,
+                redirect_uri=actual_redirect,
             )
         except Exception as e:
             raise click.ClickException(str(e)) from e
@@ -874,6 +1014,131 @@ def delete(
     )
     store.delete(ns, auth_id)
     click.echo(f"Deleted {auth_id}")
+
+
+# Provider-specific revocation endpoints
+_REVOKE_ENDPOINTS: Dict[str, str] = {
+    "gemini": "https://oauth2.googleapis.com/revoke",
+    "google": "https://oauth2.googleapis.com/revoke",
+}
+
+
+@auth_cli.command()
+@click.argument("auth_id")
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Delete locally even if remote revocation fails.",
+)
+@click.option(
+    "--store",
+    "store_dir",
+    default=default_auth_store_dir(),
+    show_default=True,
+    help="Auth store directory",
+)
+@click.option(
+    "--namespace",
+    "--ns",
+    "ns",
+    default="default",
+    show_default=True,
+    help="Auth namespace",
+)
+@click.option(
+    "--encrypt/--plaintext",
+    "encrypt",
+    default=True,
+    show_default=True,
+    help="Use encrypted store.",
+)
+@click.option(
+    "--encryption-key",
+    default=None,
+    help="Secret used to derive the encryption key.",
+)
+@click.option(
+    "--allow-plaintext-fallback",
+    is_flag=True,
+    default=False,
+    help="Allow reading legacy plaintext auth JSON.",
+)
+def revoke(
+    auth_id: str,
+    force: bool,
+    store_dir: str,
+    ns: str,
+    encrypt: bool,
+    encryption_key: Optional[str],
+    allow_plaintext_fallback: bool,
+) -> None:
+    """
+    Revoke an OAuth token and delete from local store.
+
+    If the provider supports revocation, attempts remote revocation first.
+    Use --force to delete locally even if remote revocation fails.
+
+    Examples:
+      - `litellm auth revoke anthropic-20241217`
+      - `litellm auth revoke gemini-20241217 --force`
+    """
+    from litellm.auth.provider_http import http_post_with_retry
+
+    store = _build_store(
+        store_dir,
+        encrypt=encrypt,
+        encryption_key=encryption_key,
+        allow_plaintext_fallback=allow_plaintext_fallback,
+    )
+
+    rec = store.get(ns, auth_id)
+    if rec is None:
+        raise click.ClickException(f"AuthRecord not found: {auth_id}")
+
+    provider = (rec.provider or "").strip().lower()
+    revoke_url = _REVOKE_ENDPOINTS.get(provider)
+    revoke_attempted = False
+    revoke_succeeded = False
+
+    # Attempt remote revocation if supported
+    if revoke_url:
+        token = rec.metadata.get("access_token") or rec.metadata.get("refresh_token")
+        if token:
+            revoke_attempted = True
+            try:
+                resp = http_post_with_retry(
+                    revoke_url,
+                    data={"token": token},
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    timeout=10.0,
+                    max_attempts=2,
+                )
+                if resp.status_code in (200, 204):
+                    revoke_succeeded = True
+                    click.echo(f"✓ Remote revocation succeeded for {provider}")
+                else:
+                    click.echo(
+                        f"⚠ Remote revocation returned HTTP {resp.status_code}",
+                        err=True,
+                    )
+            except Exception as e:
+                click.echo(f"⚠ Remote revocation failed: {e}", err=True)
+
+    # Handle revocation failure
+    if revoke_attempted and not revoke_succeeded and not force:
+        raise click.ClickException(
+            f"Remote revocation failed for {auth_id}. Use --force to delete locally anyway."
+        )
+
+    # Delete locally
+    store.delete(ns, auth_id)
+    if revoke_attempted and revoke_succeeded:
+        click.echo(f"Revoked and deleted {auth_id}")
+    elif revoke_attempted:
+        click.echo(f"Deleted {auth_id} (remote revocation failed, forced)")
+    else:
+        click.echo(f"Deleted {auth_id} (provider '{provider}' does not support revocation)")
 
 
 @auth_cli.command()
