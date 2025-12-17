@@ -177,6 +177,22 @@ plugins = "pydantic.mypy"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+addopts = ["--import-mode=importlib"]
+pythonpath = [
+    ".",
+    "tests",
+    "tests/unified_google_tests",
+    "tests/llm_responses_api_testing",
+    "tests/vector_store_tests",
+    "tests/llm_translation",
+    "tests/image_gen_tests",
+    "tests/pass_through_unit_tests",
+    "tests/pass_through_tests",
+    "tests/ocr_tests",
+    "tests/local_testing",
+    "tests/logging_callback_tests",
+    "tests/router_unit_tests",
+]
 markers = [
     "asyncio: mark test as an asyncio test",
 ]
