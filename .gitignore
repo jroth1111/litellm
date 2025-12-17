@@ -100,4 +100,9 @@ update_model_cost_map.py
 tests/test_litellm/proxy/_experimental/mcp_server/test_mcp_server_manager.py
 litellm/proxy/_experimental/out/guardrails/index.html
 scripts/test_vertex_ai_search.py
-examples/
+# Cloned 3rd-party repos for OAuth comparison (not committed)
+examples/CLIProxyAPIPlus/
+examples/kilocode/
+examples/opencode/
+examples/openrouter-claude-proxy/
+examples/claude-relay-service/

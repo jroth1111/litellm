@@ -73,6 +73,8 @@ def _make_client(*, tmp_path, monkeypatch, fake_handler):
     asyncio.run(proxy_server.initialize(config=str(config_fp)))
     app = FastAPI()
     app.include_router(proxy_server.router)
+    # `/v1/messages` lives on the Anthropic router, not the OpenAI router.
+    app.include_router(proxy_server.anthropic_router)
     return TestClient(app)
 
 
@@ -206,4 +208,3 @@ def test_messages_rotate_when_refresh_fails(tmp_path, monkeypatch, setup_and_tea
     assert resp.status_code == 200, resp.text
     assert resp.json()["content"][0]["text"] == "ok"
     assert calls == ["Bearer tok1", "Bearer tok2"]
-
