@@ -89,7 +89,7 @@ python -c "from litellm import completion; print(completion('claude-sonnet-4-202
 
 ### Upstream PR Status
 
-This feature is proposed for inclusion in upstream LiteLLM. See the RFC issue for discussion.
+This feature is proposed for inclusion in upstream LiteLLM. See [RFC #18099](https://github.com/BerriAI/litellm/issues/18099) for discussion.
 
 ---
 
