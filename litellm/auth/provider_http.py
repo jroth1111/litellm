@@ -48,6 +48,16 @@ def _resolve_proxy_url(explicit_proxy: Optional[str] = None) -> Optional[str]:
     return None
 
 
+def resolve_oauth_proxy_url(explicit_proxy: Optional[str] = None) -> Optional[str]:
+    """
+    Public wrapper for resolving the proxy URL for OAuth HTTP calls.
+
+    Keeps the internal resolution order stable while allowing other modules
+    to reuse it without copy/paste.
+    """
+    return _resolve_proxy_url(explicit_proxy)
+
+
 def _build_client(
     timeout: float = 30.0,
     proxy: Optional[str] = None,
@@ -73,6 +83,17 @@ def _build_client(
         return httpx.Client(timeout=timeout, proxy=proxy_url)
 
     return httpx.Client(timeout=timeout)
+
+
+def build_oauth_httpx_client(
+    *,
+    timeout: float = 30.0,
+    proxy: Optional[str] = None,
+) -> httpx.Client:
+    """
+    Public wrapper for building an httpx client for OAuth calls.
+    """
+    return _build_client(timeout=timeout, proxy=proxy)
 
 
 def _retry_after_seconds(resp: httpx.Response) -> Optional[float]:
