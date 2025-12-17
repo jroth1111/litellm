@@ -97,6 +97,7 @@ This feature is proposed for inclusion in upstream LiteLLM. See [Feature Request
 - `main` mirrors upstream LiteLLM and exists purely to keep future pulls clean; avoid landing OAuth-specific changes directly there so merges stay simple.
 - `oauth-subscriptions` builds on `main` with all Personal OAuth work so that the proxy, Router, and shared SDK can rotate subscriptions without needing API keys.
 - OAuth touches both the SDK (`litellm/auth/*`, adapters, router healing/rotation) and the proxy (`litellm/proxy/proxy_server.py`, `litellm/auth/api.py`, auth settings/CLI helpers). Keeping the feature branch focused on that work makes it easier to keep upstream in sync while iterating on the OAuth story.
+- Run `scripts/sync_upstream_main.sh` before rebasing or merging future OAuth work to automate fetching/fast-forwarding `upstream/main`, updating `origin/main`, and switching you back to your working branch.
 
 ---
 
@@ -600,4 +601,3 @@ All these checks must pass before your PR can be merged.
 <a href="https://github.com/BerriAI/litellm/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=BerriAI/litellm" />
 </a>
-
