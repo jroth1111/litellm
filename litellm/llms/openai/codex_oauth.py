@@ -30,9 +30,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 from urllib.parse import urlencode
 
+import logging
+
 import httpx
 
 from litellm.auth.provider_http import http_post_with_retry
+
+logger = logging.getLogger("litellm.auth.oauth.openai")
 
 # OAuth constants from CLIProxyAPIPlus
 OPENAI_AUTH_URL = os.getenv("OPENAI_AUTH_URL", "https://auth.openai.com/oauth/authorize")
@@ -40,6 +44,7 @@ OPENAI_TOKEN_URL = os.getenv("OPENAI_TOKEN_URL", "https://auth.openai.com/oauth/
 OPENAI_CLIENT_ID = os.getenv("OPENAI_CLIENT_ID", "app_EMoamEEZ73f0CkXaXp7hrann")
 OPENAI_REDIRECT_URI = os.getenv("OPENAI_REDIRECT_URI", "http://localhost:1455/auth/callback")
 OPENAI_SCOPES = os.getenv("OPENAI_SCOPES", "openid email profile offline_access")
+OPENAI_EXPECTED_ISSUER = os.getenv("OPENAI_EXPECTED_ISSUER", "https://auth.openai.com")
 
 
 @dataclass
@@ -170,23 +175,34 @@ def exchange_code_for_tokens(
     account_id = None
     id_token = result.get("id_token")
     if id_token:
-        # Simple JWT payload extraction (base64 decode middle part)
-        try:
-            import base64
-            import json as json_module
-            parts = id_token.split(".")
-            if len(parts) >= 2:
-                # Add padding if necessary
-                payload = parts[1]
-                padding = 4 - (len(payload) % 4)
-                if padding != 4:
-                    payload += "=" * padding
-                claims = json_module.loads(base64.urlsafe_b64decode(payload))
-                email = claims.get("email")
-                # Try different account ID fields
-                account_id = claims.get("sub") or claims.get("account_id")
-        except Exception:
-            pass  # ID token parsing is best-effort
+        # Verify ID token claims before extracting data
+        if not verify_id_token(
+            id_token,
+            expected_issuer=OPENAI_EXPECTED_ISSUER,
+            expected_audience=OPENAI_CLIENT_ID,
+        ):
+            logger.warning(
+                "openai_id_token_verification_failed: ID token failed claim verification "
+                "(expired, wrong issuer, or wrong audience). Claims will not be extracted."
+            )
+        else:
+            # Simple JWT payload extraction (base64 decode middle part)
+            try:
+                import base64
+                import json as json_module
+                parts = id_token.split(".")
+                if len(parts) >= 2:
+                    # Add padding if necessary
+                    payload = parts[1]
+                    padding = 4 - (len(payload) % 4)
+                    if padding != 4:
+                        payload += "=" * padding
+                    claims = json_module.loads(base64.urlsafe_b64decode(payload))
+                    email = claims.get("email")
+                    # Try different account ID fields
+                    account_id = claims.get("sub") or claims.get("account_id")
+            except Exception:
+                pass  # ID token parsing is best-effort
     
     return OpenAITokenData(
         access_token=result["access_token"],
@@ -267,21 +283,32 @@ def refresh_tokens(
     account_id = None
     id_token = result.get("id_token")
     if id_token:
-        try:
-            import base64
-            import json as json_module
-            parts = id_token.split(".")
-            if len(parts) >= 2:
-                payload = parts[1]
-                padding = 4 - (len(payload) % 4)
-                if padding != 4:
-                    payload += "=" * padding
-                claims = json_module.loads(base64.urlsafe_b64decode(payload))
-                email = claims.get("email")
-                account_id = claims.get("sub") or claims.get("account_id")
-        except Exception:
-            pass
-    
+        # Verify ID token claims before extracting data
+        if not verify_id_token(
+            id_token,
+            expected_issuer=OPENAI_EXPECTED_ISSUER,
+            expected_audience=OPENAI_CLIENT_ID,
+        ):
+            logger.warning(
+                "openai_id_token_verification_failed: ID token failed claim verification "
+                "(expired, wrong issuer, or wrong audience). Claims will not be extracted."
+            )
+        else:
+            try:
+                import base64
+                import json as json_module
+                parts = id_token.split(".")
+                if len(parts) >= 2:
+                    payload = parts[1]
+                    padding = 4 - (len(payload) % 4)
+                    if padding != 4:
+                        payload += "=" * padding
+                    claims = json_module.loads(base64.urlsafe_b64decode(payload))
+                    email = claims.get("email")
+                    account_id = claims.get("sub") or claims.get("account_id")
+            except Exception:
+                pass
+
     return OpenAITokenData(
         access_token=result["access_token"],
         refresh_token=result.get("refresh_token", refresh_token),

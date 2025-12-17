@@ -244,6 +244,7 @@ def refresh_tokens(
     *,
     token_url: Optional[str] = None,
     client_id: Optional[str] = None,
+    client_secret: Optional[str] = None,
 ) -> QwenTokenData:
     """
     Refresh Qwen access token using a refresh token.
@@ -263,6 +264,8 @@ def refresh_tokens(
         "refresh_token": refresh_token,
         "client_id": client_id or QWEN_CLIENT_ID,
     }
+    if client_secret:
+        data["client_secret"] = client_secret
 
     with httpx.Client(timeout=timeout) as client:
         resp = client.post(

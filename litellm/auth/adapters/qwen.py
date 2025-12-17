@@ -67,6 +67,7 @@ class QwenSubscriptionAdapter:
             refresh_token=refresh_token,
             token_url=auth.attributes.get("token_url"),
             client_id=auth.attributes.get("client_id"),
+            client_secret=auth.attributes.get("client_secret"),
         )
         updated = auth.clone()
         updated.metadata.update(token_dataclass_to_metadata(token))
