@@ -2,7 +2,7 @@
         🚅 LiteLLM + Personal OAuth
     </h1>
     <p align="center">
-        <b>Use your ChatGPT Plus, Claude Pro, Gemini Advanced, and GitHub Copilot subscriptions with LiteLLM</b>
+        <b>Use your ChatGPT Plus, Claude Pro, Google AI Pro, and GitHub Copilot subscriptions with LiteLLM</b>
     </p>
     <p align="center">
         <img src="https://img.shields.io/badge/Personal%20OAuth-Extension-blueviolet?style=for-the-badge" alt="Personal OAuth Extension">
@@ -28,7 +28,7 @@ Personal OAuth lets you authenticate with your subscription account and use it p
 # Login with your subscription account
 litellm auth login anthropic    # Opens browser for Claude Pro login
 litellm auth login openai       # Opens browser for ChatGPT Plus login
-litellm auth login gemini       # Opens browser for Gemini Advanced login
+litellm auth login gemini       # Opens browser for Google AI Pro login
 litellm auth login copilot      # Device code flow for GitHub Copilot
 
 # Check account status
@@ -59,10 +59,11 @@ response = completion(model="claude-sonnet-4-20250514", messages=[...])
 |----------|-------------|-----------|--------------|
 | **Anthropic** | Claude Pro ($20/mo) | Browser OAuth | ✅ Yes |
 | **OpenAI** | ChatGPT Plus ($20/mo) | Browser OAuth | ✅ Yes |
-| **Google** | Gemini Advanced ($20/mo) | Browser OAuth | ✅ Yes |
+| **Google** | Google AI Pro ($20/mo) | Browser OAuth | ✅ Yes |
 | **GitHub** | Copilot ($10/mo) | Device Code | ❌ Re-login required |
 | **Qwen** | Qwen subscription | Device Code | ✅ Yes |
 | **Cursor** | Cursor Pro ($20/mo) | Browser OAuth | ✅ Yes |
+| **Antigravity** | Antigravity subscription | Browser OAuth | ✅ Yes |
 
 ### Key Features
 
