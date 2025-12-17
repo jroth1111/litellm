@@ -1,13 +1,6 @@
 import asyncio
 import os
-import sys
 from datetime import datetime, timedelta, timezone
-
-# Ensure local repo version of litellm is used (not an installed package).
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
-for name in list(sys.modules.keys()):
-    if name == "litellm" or name.startswith("litellm."):
-        sys.modules.pop(name, None)
 
 import pytest
 litellm = pytest.importorskip("litellm", reason="requires LiteLLM dependencies")
@@ -23,15 +16,12 @@ from fastapi.testclient import TestClient
 
 AuthRecord = auth_core.AuthRecord
 JsonFileAuthStore = auth_file_store.JsonFileAuthStore
-cleanup_router_config_variables = proxy_server.cleanup_router_config_variables
-initialize = proxy_server.initialize
-router = proxy_server.router
 
 
 @pytest.fixture(scope="function")
-def client(tmp_path, monkeypatch):
+def client(tmp_path, monkeypatch, setup_and_teardown):
     monkeypatch.setenv("LITELLM_DONT_SHOW_FEEDBACK_BOX", "true")
-    cleanup_router_config_variables()
+    proxy_server.cleanup_router_config_variables()
 
     # Build a local auth store with two OpenAI subscription credentials.
     store_dir = tmp_path / "auth_store"
@@ -79,9 +69,9 @@ def client(tmp_path, monkeypatch):
         encoding="utf-8",
     )
 
-    asyncio.run(initialize(config=str(config_fp)))
+    asyncio.run(proxy_server.initialize(config=str(config_fp)))
     app = FastAPI()
-    app.include_router(router)
+    app.include_router(proxy_server.router)
     return TestClient(app)
 
 

@@ -27,6 +27,20 @@ def _load_module(path: pathlib.Path, name: str):
     return mod
 
 
+def _pop_module_tree(prefix: str) -> dict:
+    """
+    Remove a module and all submodules from sys.modules.
+
+    Returns a dict of removed modules for restoration.
+    """
+    removed = {}
+    keys = list(sys.modules.keys())
+    for key in keys:
+        if key == prefix or key.startswith(prefix + "."):
+            removed[key] = sys.modules.pop(key)
+    return removed
+
+
 class SubscriptionAdaptersTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -54,10 +68,13 @@ class SubscriptionAdaptersTests(unittest.TestCase):
         self.assertIsNotNone(adapter)
 
         # Ensure the heavy `litellm.llms` package isn't imported as a side-effect.
-        sys.modules.pop("litellm.llms", None)
-        oauth_mod = adapter._oauth()  # type: ignore[attr-defined]
-        self.assertIsNotNone(oauth_mod)
-        self.assertNotIn("litellm.llms", sys.modules)
+        removed = _pop_module_tree("litellm.llms")
+        try:
+            oauth_mod = adapter._oauth()  # type: ignore[attr-defined]
+            self.assertIsNotNone(oauth_mod)
+            self.assertNotIn("litellm.llms", sys.modules)
+        finally:
+            sys.modules.update(removed)
 
     def test_model_discovery_endpoint_builder(self):
         md = _load_module(MODEL_DISCOVERY, "litellm.auth.model_discovery")
@@ -76,4 +93,3 @@ class SubscriptionAdaptersTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
