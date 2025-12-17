@@ -1,8 +1,8 @@
 import asyncio
-import os
 from datetime import datetime, timedelta, timezone
 
 import pytest
+
 litellm = pytest.importorskip("litellm", reason="requires LiteLLM dependencies")
 proxy_server = pytest.importorskip(
     "litellm.proxy.proxy_server",
@@ -23,7 +23,6 @@ def client(tmp_path, monkeypatch, setup_and_teardown):
     monkeypatch.setenv("LITELLM_DONT_SHOW_FEEDBACK_BOX", "true")
     proxy_server.cleanup_router_config_variables()
 
-    # Build a local auth store with two OpenAI subscription credentials.
     store_dir = tmp_path / "auth_store"
     store = JsonFileAuthStore(str(store_dir))
     now = datetime.now(timezone.utc)
@@ -31,7 +30,7 @@ def client(tmp_path, monkeypatch, setup_and_teardown):
         "default",
         AuthRecord(
             id="a1",
-            provider="openai",
+            provider="anthropic",
             metadata={"access_token": "tok1", "refresh_token": "rt1"},
             last_refreshed_at=now,
         ),
@@ -40,22 +39,21 @@ def client(tmp_path, monkeypatch, setup_and_teardown):
         "default",
         AuthRecord(
             id="a2",
-            provider="openai",
-            metadata={"access_token": "tok2"},
+            provider="anthropic",
+            metadata={"access_token": "tok2", "refresh_token": "rt2"},
             last_refreshed_at=now - timedelta(seconds=5),
         ),
     )
 
-    # Minimal proxy config: a subscription-mode deployment with no static api_key.
     config_fp = tmp_path / "config.yaml"
     config_fp.write_text(
         "\n".join(
             [
                 "model_list:",
-                "  - model_name: openai-model",
+                "  - model_name: claude-model",
                 "    auth_mode: subscription",
                 "    litellm_params:",
-                "      model: openai/gpt-4o",
+                "      model: anthropic/claude-3-5-sonnet",
                 "auth_settings:",
                 "  enabled: true",
                 "  store_backend: json",
@@ -79,12 +77,13 @@ def test_same_request_rotation_on_429(client, monkeypatch):
     calls = []
 
     async def fake_acompletion(*_args, **kwargs):
-        token = kwargs.get("api_key")
+        headers = kwargs.get("headers") or {}
+        token = headers.get("Authorization") or ""
         calls.append(token)
-        if token == "tok1":
+        if token.endswith("tok1"):
             raise litellm.RateLimitError(
                 message="rate limit",
-                llm_provider="openai",
+                llm_provider="anthropic",
                 model=str(kwargs.get("model", "")),
             )
         return litellm.ModelResponse(
@@ -97,27 +96,20 @@ def test_same_request_rotation_on_429(client, monkeypatch):
     resp = client.post(
         "/v1/chat/completions",
         json={
-            "model": "openai-model",
+            "model": "claude-model",
             "messages": [{"role": "user", "content": "hi"}],
             "max_tokens": 1,
         },
     )
     assert resp.status_code == 200, resp.text
-    payload = resp.json()
-    assert payload["choices"][0]["message"]["content"] == "ok"
-    assert calls == ["tok1", "tok2"]
+    assert resp.json()["choices"][0]["message"]["content"] == "ok"
+    assert calls == ["Bearer tok1", "Bearer tok2"]
 
 
 def test_same_request_refresh_on_401_then_retry(client, monkeypatch):
-    """
-    If the active subscription token returns 401/403, Router should attempt a refresh once
-    and retry the same request with the refreshed token before rotating to a different account.
-    """
     calls = []
-
-    # Patch the active adapter to refresh access_token.
     router = proxy_server.llm_router
-    strategy = router.auth_strategies["openai"]
+    strategy = router.auth_strategies["anthropic"]
 
     def fake_refresh(auth, _ctx):
         updated = auth.clone()
@@ -127,12 +119,13 @@ def test_same_request_refresh_on_401_then_retry(client, monkeypatch):
     monkeypatch.setattr(strategy, "refresh", fake_refresh)
 
     async def fake_acompletion(*_args, **kwargs):
-        token = kwargs.get("api_key")
+        headers = kwargs.get("headers") or {}
+        token = headers.get("Authorization") or ""
         calls.append(token)
-        if token == "tok1":
+        if token.endswith("tok1"):
             raise litellm.AuthenticationError(
                 message="expired",
-                llm_provider="openai",
+                llm_provider="anthropic",
                 model=str(kwargs.get("model", "")),
             )
         return litellm.ModelResponse(
@@ -145,24 +138,20 @@ def test_same_request_refresh_on_401_then_retry(client, monkeypatch):
     resp = client.post(
         "/v1/chat/completions",
         json={
-            "model": "openai-model",
+            "model": "claude-model",
             "messages": [{"role": "user", "content": "hi"}],
             "max_tokens": 1,
         },
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["choices"][0]["message"]["content"] == "ok"
-    assert calls == ["tok1", "tok1-refreshed"]
+    assert calls == ["Bearer tok1", "Bearer tok1-refreshed"]
 
 
 def test_rotate_when_refresh_fails(client, monkeypatch):
-    """
-    If refresh fails, Router should rotate to the next auth record within the same request.
-    """
     calls = []
-
     router = proxy_server.llm_router
-    strategy = router.auth_strategies["openai"]
+    strategy = router.auth_strategies["anthropic"]
 
     def fake_refresh(_auth, _ctx):
         raise RuntimeError("refresh failed")
@@ -170,12 +159,13 @@ def test_rotate_when_refresh_fails(client, monkeypatch):
     monkeypatch.setattr(strategy, "refresh", fake_refresh)
 
     async def fake_acompletion(*_args, **kwargs):
-        token = kwargs.get("api_key")
+        headers = kwargs.get("headers") or {}
+        token = headers.get("Authorization") or ""
         calls.append(token)
-        if token == "tok1":
+        if token.endswith("tok1"):
             raise litellm.AuthenticationError(
                 message="expired",
-                llm_provider="openai",
+                llm_provider="anthropic",
                 model=str(kwargs.get("model", "")),
             )
         return litellm.ModelResponse(
@@ -188,11 +178,11 @@ def test_rotate_when_refresh_fails(client, monkeypatch):
     resp = client.post(
         "/v1/chat/completions",
         json={
-            "model": "openai-model",
+            "model": "claude-model",
             "messages": [{"role": "user", "content": "hi"}],
             "max_tokens": 1,
         },
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["choices"][0]["message"]["content"] == "ok"
-    assert calls == ["tok1", "tok2"]
+    assert calls == ["Bearer tok1", "Bearer tok2"]

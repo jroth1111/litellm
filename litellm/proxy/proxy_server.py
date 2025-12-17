@@ -977,6 +977,26 @@ try:
 
     # Only modify files if a custom server root path is set
     if server_root_path and server_root_path != "/":
+        # Avoid mutating the source UI build directory (which may be tracked in git).
+        # Instead, copy to a runtime temp dir and perform replacements there.
+        try:
+            import hashlib
+            import shutil
+            import tempfile
+
+            digest = hashlib.sha256(
+                f"{ui_path}|{server_root_path}".encode("utf-8")
+            ).hexdigest()[:16]
+            runtime_ui_path = os.path.join(
+                tempfile.gettempdir(), "litellm_ui_root_path", digest
+            )
+            if not os.path.exists(runtime_ui_path):
+                shutil.copytree(ui_path, runtime_ui_path)
+            ui_path = runtime_ui_path
+        except Exception:
+            # Best-effort; fall back to in-place replacement if copy fails.
+            pass
+
         # Iterate through files in the UI directory
         for root, dirs, files in os.walk(ui_path):
             for filename in files:
@@ -1031,27 +1051,34 @@ try:
     )
     # print(f"mounted _next at {server_root_path}/ui/_next")
 
-    app.mount("/ui", StaticFiles(directory=ui_path, html=True), name="ui")
+    class _HtmlFallbackStaticFiles(StaticFiles):
+        """
+        Serve Next.js static export output without mutating the UI build directory.
 
-    # Handle HTML file restructuring
-    # Skip this for non-root Docker since it's done at build time
-    # Support both "true" and "True" for case-insensitive comparison
-    if os.getenv("LITELLM_NON_ROOT", "").lower() != "true":
-        for filename in os.listdir(ui_path):
-            if filename.endswith(".html") and filename != "index.html":
-                # Create a folder with the same name as the HTML file
-                folder_name = os.path.splitext(filename)[0]
-                folder_path = os.path.join(ui_path, folder_name)
-                os.makedirs(folder_path, exist_ok=True)
+        Supports extensionless route access for exported pages:
+          - GET /ui/login  -> serves /ui/login.html (if present)
+          - GET /ui/login/ -> serves /ui/login.html (if present)
 
-                # Move the HTML file into the folder and rename it to 'index.html'
-                src = os.path.join(ui_path, filename)
-                dst = os.path.join(folder_path, "index.html")
-                os.rename(src, dst)
-    else:
-        verbose_proxy_logger.info(
-            "Skipping runtime HTML restructuring for non-root Docker (already done at build time)"
-        )
+        This replaces the previous behavior that renamed/moved *.html files at import
+        time (which was unsafe and caused tracked files to be modified in dev/tests).
+        """
+
+        async def get_response(self, path: str, scope):  # type: ignore[override]
+            resp = await super().get_response(path, scope)
+            if getattr(resp, "status_code", None) != 404:
+                return resp
+
+            cleaned = (path or "").rstrip("/")
+            if not cleaned or cleaned.endswith(".html"):
+                return resp
+
+            # Avoid mapping paths that already look like asset files.
+            if "." in os.path.basename(cleaned):
+                return resp
+
+            return await super().get_response(cleaned + ".html", scope)
+
+    app.mount("/ui", _HtmlFallbackStaticFiles(directory=ui_path, html=True), name="ui")
 
 except Exception:
     pass

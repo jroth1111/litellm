@@ -98,6 +98,28 @@ class TestAnthropicOAuth(unittest.TestCase):
         self.assertTrue(adapter.supports("anthropic/claude-3-opus"))
         self.assertTrue(adapter.supports("Claude-Sonnet"))
 
+    def test_anthropic_provider_accepts_bearer_auth(self):
+        """
+        Anthropic provider should accept Authorization: Bearer tokens for subscription OAuth,
+        and must not require / inject x-api-key when bearer auth is present.
+        """
+        from litellm.llms.anthropic.common_utils import AnthropicModelInfo
+
+        model_info = AnthropicModelInfo()
+        headers = {"Authorization": "Bearer test-token"}
+        out = model_info.validate_environment(
+            headers=headers,
+            model="anthropic/claude-3-5-sonnet",
+            messages=[{"role": "user", "content": "hi"}],
+            optional_params={},
+            litellm_params={},
+            api_key=None,
+            api_base=None,
+        )
+        self.assertEqual(out.get("Authorization"), "Bearer test-token")
+        self.assertNotIn("x-api-key", out)
+        self.assertIn("anthropic-version", out)
+
 
 if __name__ == "__main__":
     unittest.main()
