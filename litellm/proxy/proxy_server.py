@@ -1058,9 +1058,6 @@ try:
         Supports extensionless route access for exported pages:
           - GET /ui/login  -> serves /ui/login.html (if present)
           - GET /ui/login/ -> serves /ui/login.html (if present)
-
-        This replaces the previous behavior that renamed/moved *.html files at import
-        time (which was unsafe and caused tracked files to be modified in dev/tests).
         """
 
         async def get_response(self, path: str, scope):  # type: ignore[override]
@@ -4400,7 +4397,7 @@ def get_litellm_model_info(model: dict = {}):
     model_info = model.get("model_info", {})
     model_to_lookup = model.get("litellm_params", {}).get("model", None)
     try:
-        if "azure" in model_to_lookup:
+        if "azure" in model_to_lookup or model_info.get("base_model"):
             model_to_lookup = model_info.get("base_model", None)
         litellm_model_info = litellm.get_model_info(model_to_lookup)
         return litellm_model_info
@@ -4603,7 +4600,7 @@ class ProxyStartupEvent:
         ### MONITOR SPEND LOGS QUEUE (queue-size-based job) ###
         if general_settings.get("disable_spend_logs", False) is False:
             from litellm.proxy.utils import _monitor_spend_logs_queue
-
+            
             # Start background task to monitor spend logs queue size
             asyncio.create_task(
                 _monitor_spend_logs_queue(
@@ -5381,14 +5378,16 @@ async def completion(  # noqa: PLR0915
 
         if _data.get("stream", None) is not None and _data["stream"] is True:
             _text_response = litellm.ModelResponse()
-            _text_response.choices[0].text = e.message  # type: ignore[attr-defined]
+            # Set text attribute dynamically for text completion format
+            setattr(_text_response.choices[0], "text", e.message)
             _text_response.model = e.model  # type: ignore[assignment]
             _usage = litellm.Usage(
                 prompt_tokens=0,
                 completion_tokens=0,
                 total_tokens=0,
             )
-            _text_response.usage = _usage  # type: ignore[assignment]
+            # Set usage attribute dynamically (ModelResponse accepts usage in __init__ but it's not in type definition)
+            setattr(_text_response, "usage", _usage)
             _iterator = litellm.utils.ModelResponseIterator(
                 model_response=_text_response, convert_to_delta=True
             )
@@ -5548,7 +5547,7 @@ async def embeddings(  # noqa: PLR0915
             # check if provider accept list of tokens as input - e.g. for langchain integration
             if llm_router is not None and data.get("model") in router_model_names:
                 # Use router's O(1) lookup instead of O(N) iteration through llm_model_list
-                deployment = llm_router.get_deployment(model_id=data["model"])
+                deployment = llm_router.get_deployment_by_model_group_name(model_group_name=data["model"])
                 if deployment is not None:
                     litellm_params = deployment.get("litellm_params", {}) or {}
                     litellm_model = litellm_params.get("model", "")

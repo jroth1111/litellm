@@ -61,6 +61,7 @@ const sidebars = {
           "proxy/guardrails/enkryptai",
           "proxy/guardrails/ibm_guardrails",
           "proxy/guardrails/grayswan",
+          "proxy/guardrails/hiddenlayer",
           "proxy/guardrails/lasso_security",
           "proxy/guardrails/litellm_content_filter",
           "proxy/guardrails/guardrails_ai",
@@ -410,7 +411,8 @@ const sidebars = {
           label: "/a2a - A2A Agent Gateway",
           items: [
             "a2a",
-            "a2a_agent_permissions",
+            "a2a_cost_tracking",
+            "a2a_agent_permissions"
           ],
         },
         "assistants",
@@ -470,6 +472,7 @@ const sidebars = {
           "generateContent",
           "apply_guardrail",
           "bedrock_invoke",
+          "interactions",
         {
           type: "category",
           label: "/images",
@@ -608,6 +611,7 @@ const sidebars = {
           label: "Azure AI",
           items: [
             "providers/azure_ai",
+            "providers/azure_ai_agents",
             "providers/azure_ocr",
             "providers/azure_document_intelligence",
             "providers/azure_ai_speech",
@@ -629,6 +633,7 @@ const sidebars = {
             "providers/vertex_speech",
             "providers/vertex_batch",
             "providers/vertex_ocr",
+            "providers/vertex_ai_agent_engine",
           ]
         },
         {
@@ -735,6 +740,7 @@ const sidebars = {
         "providers/petals",
         "providers/publicai",
         "providers/predibase",
+        "providers/pydantic_ai_agent",
         "providers/ragflow",
         "providers/recraft",
         "providers/replicate",
@@ -754,7 +760,14 @@ const sidebars = {
         "providers/triton-inference-server",
         "providers/v0",
         "providers/vercel_ai_gateway",
-        "providers/vllm",
+        {
+          type: "category",
+          label: "vLLM",
+          items: [
+            "providers/vllm",
+            "providers/vllm_batches",
+          ]
+        },
         "providers/volcano",
         "providers/voyage",
         "providers/wandb_inference",

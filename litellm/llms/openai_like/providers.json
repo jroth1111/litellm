@@ -20,5 +20,9 @@
     "api_key_env": "CURSOR_API_KEY",
     "api_base_env": "CURSOR_API_BASE",
     "base_class": "openai_gpt"
+  },
+  "veniceai": {
+    "base_url": "https://api.venice.ai/api/v1",
+    "api_key_env": "VENICE_AI_API_KEY"
   }
 }
