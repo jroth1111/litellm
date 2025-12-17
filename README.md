@@ -1,5 +1,100 @@
 <h1 align="center">
-        🚅 LiteLLM
+        🚅 LiteLLM + Personal OAuth
+    </h1>
+    <p align="center">
+        <b>Use your ChatGPT Plus, Claude Pro, Gemini Advanced, and GitHub Copilot subscriptions with LiteLLM</b>
+    </p>
+    <p align="center">
+        <img src="https://img.shields.io/badge/Personal%20OAuth-Extension-blueviolet?style=for-the-badge" alt="Personal OAuth Extension">
+        <img src="https://img.shields.io/badge/Providers-7-green?style=for-the-badge" alt="7 Providers">
+        <img src="https://img.shields.io/badge/No%20API%20Keys-Required-orange?style=for-the-badge" alt="No API Keys Required">
+    </p>
+
+---
+
+## What This Fork Adds
+
+This fork extends LiteLLM with **Personal OAuth** - the ability to use your existing AI subscriptions (ChatGPT Plus, Claude Pro, etc.) instead of paying for API keys.
+
+### The Problem
+
+You're already paying $20/month for ChatGPT Plus or Claude Pro. Why pay *again* for API access?
+
+### The Solution
+
+Personal OAuth lets you authenticate with your subscription account and use it programmatically:
+
+```bash
+# Login with your subscription account
+litellm auth login anthropic    # Opens browser for Claude Pro login
+litellm auth login openai       # Opens browser for ChatGPT Plus login
+litellm auth login gemini       # Opens browser for Gemini Advanced login
+litellm auth login copilot      # Device code flow for GitHub Copilot
+
+# Check account status
+litellm auth status
+```
+
+```
+Provider: anthropic (2 accounts)
+  ✓ claude-pro-1     ACTIVE     expires in 6d 23h    124 requests    1.2M tokens
+  ✓ claude-pro-2     ACTIVE     expires in 5d 12h     89 requests    0.8M tokens
+
+Provider: openai (1 account)
+  ✓ chatgpt-plus     ACTIVE     expires in 12h        56 requests    0.5M tokens
+```
+
+Then use LiteLLM normally - it automatically rotates across your accounts:
+
+```python
+from litellm import completion
+
+# No API keys needed - uses your logged-in subscription accounts
+response = completion(model="claude-sonnet-4-20250514", messages=[...])
+```
+
+### Supported Providers
+
+| Provider | Subscription | Auth Flow | Auto-Refresh |
+|----------|-------------|-----------|--------------|
+| **Anthropic** | Claude Pro ($20/mo) | Browser OAuth | ✅ Yes |
+| **OpenAI** | ChatGPT Plus ($20/mo) | Browser OAuth | ✅ Yes |
+| **Google** | Gemini Advanced ($20/mo) | Browser OAuth | ✅ Yes |
+| **GitHub** | Copilot ($10/mo) | Device Code | ❌ Re-login required |
+| **Qwen** | Qwen subscription | Device Code | ✅ Yes |
+| **Cursor** | Cursor Pro ($20/mo) | Browser OAuth | ✅ Yes |
+
+### Key Features
+
+- **Multi-Account Rotation**: Add multiple accounts per provider, automatically spread load
+- **Seamless Failover**: If one account hits rate limits, seamlessly use another
+- **Health Tracking**: Know which accounts are active, rate-limited, or expired
+- **Encrypted Storage**: Credentials encrypted at rest with AES-256-GCM
+- **Token Metrics**: Track input/output tokens per account
+- **No Credit Usage for Health Checks**: Learn health from actual requests only
+
+### Quick Start
+
+```bash
+# Install from this fork
+pip install git+https://github.com/jroth55/litellm.git@oauth-subscriptions
+
+# Login to your providers
+litellm auth login anthropic
+litellm auth login openai
+
+# Use normally
+python -c "from litellm import completion; print(completion('claude-sonnet-4-20250514', [{'role': 'user', 'content': 'Hello!'}]))"
+```
+
+### Upstream PR Status
+
+This feature is proposed for inclusion in upstream LiteLLM. See the RFC issue for discussion.
+
+---
+
+<h1 align="center">
+        🚅 LiteLLM (Upstream)
     </h1>
     <p align="center">
         <p align="center">
