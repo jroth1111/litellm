@@ -106,3 +106,9 @@ examples/kilocode/
 examples/opencode/
 examples/openrouter-claude-proxy/
 examples/claude-relay-service/
+
+LAZY_LOADING_IMPROVEMENTS.md
+**/test-results
+**/playwright-report
+**/*.storageState.json
+**/coverage
