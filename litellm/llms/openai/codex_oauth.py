@@ -238,9 +238,17 @@ def exchange_code_for_tokens(
         else:
             try:
                 claims = _parse_id_token_claims(id_token)
-                email = claims.get("email")
-                # Try different account ID fields
-                account_id = claims.get("sub") or claims.get("account_id")
+                exp = claims.get("exp")
+                # Add a leeway of 60 seconds for expiration check
+                leeway_seconds = 60
+                if exp and time.time() > (float(exp) + leeway_seconds):
+                    logger.warning(
+                        "openai_id_token_verification_failed: ID token expired. Claims will not be extracted."
+                    )
+                else:
+                    email = claims.get("email")
+                    # Try different account ID fields
+                    account_id = claims.get("sub") or claims.get("account_id")
             except Exception as e:
                 logger.debug("Failed to parse OpenAI ID token claims: %s", e)
     
@@ -361,14 +369,10 @@ def verify_id_token(
     leeway_seconds: int = 60,
 ) -> bool:
     """
-    Best-effort ID token verification.
+    Verifies the ID token signature and claims.
+    Requires PyJWT to be installed.
 
-    - If PyJWT is available, verifies signature using JWKS (RFC 7517) and checks
-      iss/aud/exp with leeway.
-    - Otherwise falls back to claim-only validation (no signature verification).
-
-    This function is intentionally non-throwing: callers should treat False as
-    "unverified" and avoid relying on claims for security decisions.
+    Returns False if verification fails or PyJWT is not installed.
     """
     try:
         import jwt  # type: ignore
@@ -404,36 +408,10 @@ def verify_id_token(
                 options={"require": ["exp"]},
             )
             return True
-    except Exception:
-        # PyJWT unavailable or verification failed; fall back to claim-only.
-        pass
-
-    try:
-        import base64
-        import json as json_module
-
-        parts = id_token.split(".")
-        if len(parts) < 2:
-            return False
-        payload = parts[1]
-        padding = 4 - (len(payload) % 4)
-        if padding != 4:
-            payload += "=" * padding
-        claims = json_module.loads(base64.urlsafe_b64decode(payload))
-
-        from time import time as now
-
-        exp = claims.get("exp")
-        if exp and (now() - leeway_seconds) > float(exp):
-            return False
-        if expected_issuer and claims.get("iss") and claims.get("iss") != expected_issuer:
-            return False
-        if expected_audience:
-            aud = claims.get("aud")
-            if isinstance(aud, str) and aud != expected_audience:
-                return False
-            if isinstance(aud, list) and expected_audience not in aud:
-                return False
-        return True
-    except Exception:
+        return False
+    except ImportError:
+        logger.error("PyJWT not installed. Cannot verify ID token signature.")
+        return False
+    except Exception as e:
+        logger.warning(f"ID token verification failed: {e}")
         return False

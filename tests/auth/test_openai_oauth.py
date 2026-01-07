@@ -6,6 +6,7 @@ import pathlib
 import sys
 import types
 import unittest
+from unittest.mock import MagicMock, patch
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -93,6 +94,15 @@ class TestOpenAIOAuth(unittest.TestCase):
         self.assertTrue(adapter.supports("gpt-4"))
         self.assertTrue(adapter.supports("openai/gpt-4-turbo"))
         self.assertTrue(adapter.supports("chatgpt"))
+
+    def test_verify_id_token_missing_jwt(self):
+        """Test verify_id_token returns False when jwt module is missing."""
+        from litellm.llms.openai.codex_oauth import verify_id_token
+        
+        with patch.dict(sys.modules):
+            sys.modules['jwt'] = None
+            result = verify_id_token("dummy_token")
+            self.assertFalse(result)
 
 
 if __name__ == "__main__":
