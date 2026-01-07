@@ -781,6 +781,155 @@ def refresh(
     click.echo(f"Refreshed {auth_id} ({rec.provider})\texpires_at={expires_at}")
 
 
+def _parse_duration(duration_str: str) -> Optional[timedelta]:
+    """
+    Parse a duration string like '2h', '30m', '1d' into a timedelta.
+    
+    Supported suffixes: s (seconds), m (minutes), h (hours), d (days).
+    """
+    duration_str = duration_str.strip().lower()
+    if not duration_str:
+        return None
+    
+    multipliers = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}
+    
+    for suffix, mult in multipliers.items():
+        if duration_str.endswith(suffix):
+            try:
+                value = int(duration_str[:-1])
+                return timedelta(seconds=value * mult)
+            except ValueError:
+                return None
+    
+    # Try parsing as plain seconds
+    try:
+        return timedelta(seconds=int(duration_str))
+    except ValueError:
+        return None
+
+
+@auth_cli.command(name="refresh-all")
+@click.option(
+    "--expiring-within",
+    default="2h",
+    show_default=True,
+    help="Refresh tokens expiring within this duration (e.g., 2h, 30m, 1d).",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Show what would be refreshed without actually refreshing.",
+)
+@click.option(
+    "--store",
+    "store_dir",
+    default=default_auth_store_dir(),
+    show_default=True,
+    help="Auth store directory",
+)
+@click.option(
+    "--namespace",
+    "--ns",
+    "ns",
+    default="default",
+    show_default=True,
+    help="Auth namespace",
+)
+@click.option(
+    "--encrypt/--plaintext",
+    "encrypt",
+    default=True,
+    show_default=True,
+    help="Use encrypted store.",
+)
+@click.option(
+    "--encryption-key",
+    default=None,
+    help="Secret used to derive the encryption key.",
+)
+@click.option(
+    "--allow-plaintext-fallback",
+    is_flag=True,
+    default=False,
+    help="Allow reading legacy plaintext auth JSON.",
+)
+def refresh_all(
+    expiring_within: str,
+    dry_run: bool,
+    store_dir: str,
+    ns: str,
+    encrypt: bool,
+    encryption_key: Optional[str],
+    allow_plaintext_fallback: bool,
+) -> None:
+    """
+    Refresh all tokens that are expiring soon.
+
+    Useful for automation (cron) to keep tokens fresh before they expire.
+
+    Examples:
+      - `litellm auth refresh-all`
+      - `litellm auth refresh-all --expiring-within 1d`
+      - `litellm auth refresh-all --dry-run`
+    """
+    duration = _parse_duration(expiring_within)
+    if duration is None:
+        raise click.ClickException(
+            f"Invalid duration format: '{expiring_within}'. Use formats like '2h', '30m', '1d'."
+        )
+
+    store = _build_store(
+        store_dir,
+        encrypt=encrypt,
+        encryption_key=encryption_key,
+        allow_plaintext_fallback=allow_plaintext_fallback,
+    )
+    records = store.list(ns)
+    strategies = _default_strategies()
+    now = _now()
+    threshold = now + duration
+
+    # Find tokens expiring within the threshold
+    candidates = []
+    for rec in records:
+        expiry = rec.expiration_time()
+        if expiry and expiry <= threshold and expiry > now:
+            strat = strategies.get(rec.provider)
+            if strat and getattr(strat, "supports_refresh", True):
+                candidates.append((rec, expiry, strat))
+
+    if not candidates:
+        click.echo(f"No tokens expiring within {expiring_within} that need refreshing.")
+        return
+
+    click.echo(f"Found {len(candidates)} token(s) expiring within {expiring_within}:")
+
+    refreshed_count = 0
+    failed_count = 0
+
+    for rec, expiry, strat in candidates:
+        time_left = _format_time_delta(expiry)
+        if dry_run:
+            click.echo(f"  [DRY-RUN] {rec.id} ({rec.provider}) expires in {time_left}")
+        else:
+            try:
+                refreshed = strat.refresh(rec, ctx=RequestContext(model=""))
+                store.save(ns, refreshed)
+                new_expiry = refreshed.expiration_time()
+                new_time = new_expiry.isoformat() if new_expiry else "unknown"
+                click.echo(f"  ✓ {rec.id} ({rec.provider}) refreshed, new expiry: {new_time}")
+                refreshed_count += 1
+            except Exception as e:
+                click.echo(f"  ✗ {rec.id} ({rec.provider}) failed: {e}", err=True)
+                failed_count += 1
+
+    if dry_run:
+        click.echo(f"\n[DRY-RUN] Would refresh {len(candidates)} token(s).")
+    else:
+        click.echo(f"\nRefreshed {refreshed_count} token(s), {failed_count} failed.")
+
+
 @auth_cli.command(name="test")
 @click.argument("model")
 @click.option(

@@ -4,18 +4,90 @@ Shared HTTP helpers for provider OAuth flows with minimal retry/backoff.
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 import httpx
 
 logger = logging.getLogger("litellm.auth.oauth")
 if os.getenv("LITELLM_OAUTH_DEBUG"):
     logger.setLevel(logging.DEBUG)
+
+
+# ---------------------------------------------------------------------------
+# Connection Pool for OAuth HTTP Clients
+# ---------------------------------------------------------------------------
+
+# Module-level pool: (proxy_url, timeout) -> httpx.Client
+_client_pool: Dict[Tuple[Optional[str], float], httpx.Client] = {}
+_pool_lock = threading.Lock()
+_pool_max_size = int(os.getenv("LITELLM_OAUTH_POOL_SIZE", "10"))
+
+
+def get_pooled_client(
+    timeout: float = 30.0,
+    proxy: Optional[str] = None,
+) -> httpx.Client:
+    """
+    Get or create a pooled HTTP client.
+
+    Clients are keyed by (proxy_url, timeout) for reuse.
+    Thread-safe access via lock.
+
+    Args:
+        timeout: Request timeout in seconds.
+        proxy: Proxy URL (optional).
+
+    Returns:
+        Reusable httpx.Client instance.
+    """
+    proxy_url = _resolve_proxy_url(proxy)
+    key = (proxy_url, timeout)
+
+    with _pool_lock:
+        if key in _client_pool:
+            return _client_pool[key]
+
+        # Evict oldest if pool is full
+        if len(_client_pool) >= _pool_max_size:
+            oldest_key = next(iter(_client_pool))
+            try:
+                _client_pool[oldest_key].close()
+            except Exception:
+                pass
+            del _client_pool[oldest_key]
+
+        # Create new client
+        if proxy_url:
+            logger.debug("oauth_pool_new_client", extra={"proxy": proxy_url.split("@")[-1], "timeout": timeout})
+            client = httpx.Client(timeout=timeout, proxy=proxy_url)
+        else:
+            logger.debug("oauth_pool_new_client", extra={"timeout": timeout})
+            client = httpx.Client(timeout=timeout)
+
+        _client_pool[key] = client
+        return client
+
+
+def close_client_pool() -> None:
+    """Close all pooled clients. Called at module cleanup."""
+    with _pool_lock:
+        for client in _client_pool.values():
+            try:
+                client.close()
+            except Exception:
+                pass
+        _client_pool.clear()
+
+
+# Register cleanup at interpreter shutdown
+atexit.register(close_client_pool)
 
 
 def _resolve_proxy_url(explicit_proxy: Optional[str] = None) -> Optional[str]:

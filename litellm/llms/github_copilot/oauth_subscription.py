@@ -30,32 +30,23 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-from litellm.auth.provider_http import http_get_with_retry, http_post_with_retry
+from litellm.auth.provider_http import (
+    build_oauth_httpx_client,
+    http_get_with_retry,
+    http_post_with_retry,
+    resolve_oauth_proxy_url,
+)
 from litellm.auth.core import AuthRecord, RequestContext
 
 
-def _resolve_proxy_url(explicit_proxy: Optional[str] = None) -> Optional[str]:
-    """
-    Resolve proxy URL from explicit parameter or environment variables.
-
-    Priority: explicit param > LITELLM_OAUTH_PROXY > HTTPS_PROXY > HTTP_PROXY.
-    """
-    if explicit_proxy:
-        return explicit_proxy.strip() if explicit_proxy.strip() else None
-    for var in ("LITELLM_OAUTH_PROXY", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
-        val = os.getenv(var, "").strip()
-        if val:
-            return val
-    return None
-
-
 def _build_client(timeout: float = 30.0, proxy: Optional[str] = None) -> httpx.Client:
-    """Build an httpx.Client with optional proxy support."""
-    proxy_url = _resolve_proxy_url(proxy)
+    """
+    Backwards-compatible shim. Prefer `litellm.auth.provider_http.build_oauth_httpx_client`.
+    """
+    proxy_url = resolve_oauth_proxy_url(proxy)
     if proxy_url:
         logger.debug("copilot_using_proxy", extra={"proxy": proxy_url.split("@")[-1]})
-        return httpx.Client(timeout=timeout, proxy=proxy_url)
-    return httpx.Client(timeout=timeout)
+    return build_oauth_httpx_client(timeout=timeout, proxy=proxy_url)
 
 # OAuth constants from CLIProxyAPIPlus with env overrides
 COPILOT_CLIENT_ID = os.getenv("COPILOT_CLIENT_ID", "Iv1.b507a08c87ecfe98")

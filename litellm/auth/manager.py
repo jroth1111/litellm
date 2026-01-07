@@ -135,11 +135,24 @@ class AuthManager:
         try:
             updated = self.refresh_auth(auth, strat)
             return updated
-        except Exception:
-            # mark next refresh after failure
+        except Exception as e:
+            # Graceful degradation: keep token usable if not yet expired
+            # Only record the error message and schedule retry
             failed = auth.clone()
             backoff = self._merged_backoff("failure")
             failed.next_refresh_after = now + timedelta(seconds=backoff)
+            
+            # Store last error in status_message for observability
+            error_msg = str(e) if str(e) else type(e).__name__
+            failed.status_message = f"Refresh failed: {error_msg[:200]}"
+            
+            # Check if token has actually expired
+            exp = strat.expiration(auth)
+            if exp is not None and exp <= now:
+                # Token is expired, mark as error
+                failed.status = AuthStatus.EXPIRED
+            # else: keep existing status (likely ACTIVE) - token still usable
+            
             self.store.save(self.namespace, failed)
             return failed
         finally:
