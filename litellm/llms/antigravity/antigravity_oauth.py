@@ -5,7 +5,7 @@ This module provides utilities for initiating and completing the Antigravity OAu
 flow for Cloud Code Assist API access, ported from CLIProxyAPIPlus sdk/auth/antigravity.go.
 
 Antigravity uses Google OAuth2 with specific scopes for cloud-platform and 
-Google Cloud Code capabilities.
+Google Cloud capabilities.
 
 Usage:
     from litellm.llms.antigravity.antigravity_oauth import (
@@ -28,15 +28,16 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 
-import httpx
+from litellm.auth.provider_http import http_post_with_retry, http_get_with_retry
 
-from litellm.auth.provider_http import http_post_with_retry
+logger = logging.getLogger("litellm.auth.oauth.antigravity")
 
 # OAuth constants from CLIProxyAPIPlus sdk/auth/antigravity.go with env overrides
 ANTIGRAVITY_CLIENT_ID = os.getenv(
@@ -64,6 +65,16 @@ ANTIGRAVITY_SCOPES = os.getenv(
 ANTIGRAVITY_API_ENDPOINT = "https://cloudcode-pa.googleapis.com"
 ANTIGRAVITY_API_VERSION = "v1internal"
 
+# Configurable User-Agent for API calls
+ANTIGRAVITY_USER_AGENT = os.getenv(
+    "ANTIGRAVITY_USER_AGENT",
+    "litellm-oauth/1.0"
+)
+ANTIGRAVITY_X_GOOG_API_CLIENT = os.getenv(
+    "ANTIGRAVITY_X_GOOG_API_CLIENT",
+    "litellm vscode_cloudshelleditor/0.1"
+)
+
 
 @dataclass
 class AntigravityTokenData:
@@ -71,6 +82,7 @@ class AntigravityTokenData:
     
     access_token: str
     refresh_token: Optional[str] = None
+    id_token: Optional[str] = None  # Added for consistency with OpenAI
     token_type: str = "Bearer"
     expires_at: Optional[str] = None  # ISO format
     email: Optional[str] = None
@@ -134,7 +146,10 @@ def exchange_code_for_tokens(
     
     Args:
         code: The authorization code from the OAuth callback.
+        state: The state parameter from the callback.
         redirect_uri: The redirect URI used in the authorization request.
+        code_verifier: PKCE code verifier (optional).
+        expected_state: Expected state for CSRF validation.
         timeout: HTTP request timeout.
     
     Returns:
@@ -143,6 +158,12 @@ def exchange_code_for_tokens(
     Raises:
         AntigravityAuthError: If the token exchange fails.
     """
+    # Validate state before making any network calls
+    if not state:
+        raise AntigravityAuthError("missing_state", "State parameter is required")
+    if expected_state is not None and expected_state != state:
+        raise AntigravityAuthError("state_mismatch", "State parameter mismatch")
+    
     data = {
         "code": code,
         "client_id": ANTIGRAVITY_CLIENT_ID,
@@ -151,13 +172,9 @@ def exchange_code_for_tokens(
     }
     if ANTIGRAVITY_CLIENT_SECRET:
         data["client_secret"] = ANTIGRAVITY_CLIENT_SECRET
-    if not state:
-        raise AntigravityAuthError("missing_state", "State parameter is required")
-    data["state"] = state
     if code_verifier:
         data["code_verifier"] = code_verifier
-    if expected_state is not None and expected_state != state:
-        raise AntigravityAuthError("state_mismatch", "State parameter mismatch")
+    # Note: state is NOT sent to token endpoint - Google doesn't use it there
     
     resp = http_post_with_retry(
         ANTIGRAVITY_TOKEN_URL,
@@ -191,6 +208,7 @@ def exchange_code_for_tokens(
     return AntigravityTokenData(
         access_token=result["access_token"],
         refresh_token=result.get("refresh_token"),
+        id_token=result.get("id_token"),
         token_type=result.get("token_type", "Bearer"),
         expires_at=expires_at,
     )
@@ -258,6 +276,7 @@ def refresh_tokens(
     return AntigravityTokenData(
         access_token=result["access_token"],
         refresh_token=result.get("refresh_token", refresh_token),
+        id_token=result.get("id_token"),
         token_type=result.get("token_type", "Bearer"),
         expires_at=expires_at,
     )
@@ -277,16 +296,23 @@ def fetch_user_info(
     Returns:
         Dict with user info including 'email'.
     """
-    with httpx.Client(timeout=timeout) as client:
-        resp = client.get(
+    try:
+        resp = http_get_with_retry(
             f"{ANTIGRAVITY_USERINFO_URL}?alt=json",
             headers={"Authorization": f"Bearer {access_token}"},
+            timeout=timeout,
+            max_attempts=2,
+            backoff_seconds=0.5,
         )
         
         if resp.status_code != 200:
+            logger.debug("fetch_user_info failed with status %d", resp.status_code)
             return {}
         
         return resp.json()
+    except Exception as e:
+        logger.debug("fetch_user_info error: %s", e)
+        return {}
 
 
 def fetch_project_id(
@@ -313,22 +339,29 @@ def fetch_project_id(
         }
     }
     
-    with httpx.Client(timeout=timeout) as client:
-        resp = client.post(
+    try:
+        resp = http_post_with_retry(
             endpoint_url,
             json=body,
             headers={
                 "Authorization": f"Bearer {access_token}",
                 "Content-Type": "application/json",
-                "User-Agent": "google-api-nodejs-client/9.15.1",
-                "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
+                "User-Agent": ANTIGRAVITY_USER_AGENT,
+                "X-Goog-Api-Client": ANTIGRAVITY_X_GOOG_API_CLIENT,
             },
+            timeout=timeout,
+            max_attempts=2,
+            backoff_seconds=0.5,
         )
         
         if resp.status_code != 200:
+            logger.debug("fetch_project_id failed with status %d", resp.status_code)
             return None
         
         result = resp.json()
+    except Exception as e:
+        logger.debug("fetch_project_id error: %s", e)
+        return None
     
     # Extract project ID
     project_id = result.get("cloudaicompanionProject")
@@ -338,3 +371,4 @@ def fetch_project_id(
         return project_id.get("id", "").strip() or None
     
     return None
+

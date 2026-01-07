@@ -1,15 +1,21 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+import logging
+from datetime import timedelta
+from typing import Any, Dict
 
-from ..core import AuthRecord, AuthStatus, RequestContext
-from .base import AdapterCapabilities
+
+from ..core import AuthRecord, RequestContext
+from .base import AdapterCapabilities, BaseSubscriptionAdapter
 from .llms_oauth_loader import load_module
 from .utils import token_dataclass_to_metadata
 
+_logger = logging.getLogger(__name__)
 
-class GitHubCopilotSubscriptionAdapter:
+
+class GitHubCopilotSubscriptionAdapter(BaseSubscriptionAdapter):
+    """GitHub Copilot subscription OAuth adapter with device code flow."""
+    
     provider = "github_copilot"
     supports_refresh = False
     refresh_lead_default = timedelta(minutes=5)
@@ -34,30 +40,22 @@ class GitHubCopilotSubscriptionAdapter:
         meta: Dict[str, Any] = token_dataclass_to_metadata(token)
         try:
             meta["account"] = self._oauth().fetch_user_info(meta.get("access_token") or "")
-        except Exception:
-            pass
+        except Exception as e:
+            _logger.debug("Failed to fetch user info for github_copilot: %s", e)
         return meta
 
     def supports(self, model: str) -> bool:
+        """Check if this adapter supports the given model.
+        
+        Matches models starting with 'github_copilot/' or 'copilot'.
+        """
         lowered = (model or "").lower()
-        return lowered.startswith("github_copilot/") or "copilot" in lowered
-
-    def prepare(
-        self, headers: Dict[str, str], ctx: RequestContext, auth: AuthRecord
-    ) -> Dict[str, str]:
-        token = auth.metadata.get("access_token")
-        if not token:
-            raise ValueError("missing access_token for github_copilot subscription")
-        new_headers = dict(headers)
-        new_headers["Authorization"] = f"Bearer {token}"
-        return new_headers
-
-    def expiration(self, auth: AuthRecord) -> Optional[datetime]:
-        return auth.expiration_time()
-
-    def refresh_lead(self, auth: AuthRecord) -> Optional[timedelta]:
-        return self.refresh_lead_default
+        if lowered.startswith("github_copilot/"):
+            return True
+        # Direct copilot model names without other provider prefix
+        if "/" not in lowered and lowered.startswith("copilot"):
+            return True
+        return False
 
     def refresh(self, auth: AuthRecord, ctx: RequestContext) -> AuthRecord:
         raise ValueError("github_copilot subscription tokens are not refreshable; re-login required")
-

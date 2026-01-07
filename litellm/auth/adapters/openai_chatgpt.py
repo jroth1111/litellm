@@ -1,18 +1,15 @@
 from __future__ import annotations
 
-import logging
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Any, Dict, Optional
 
-from ..core import AuthRecord, AuthStatus, RequestContext
-from .base import AdapterCapabilities
+from ..core import AuthRecord, RequestContext
+from .base import AdapterCapabilities, BaseSubscriptionAdapter
 from .llms_oauth_loader import load_module
 from .utils import token_dataclass_to_metadata
 
-_logger = logging.getLogger(__name__)
 
-
-class OpenAIChatGPTSubscriptionAdapter:
+class OpenAIChatGPTSubscriptionAdapter(BaseSubscriptionAdapter):
     """
     OpenAI ChatGPT Plus / Codex consumer OAuth adapter.
 
@@ -88,28 +85,13 @@ class OpenAIChatGPTSubscriptionAdapter:
                 return True
         return False
 
-    def prepare(
-        self, headers: Dict[str, str], ctx: RequestContext, auth: AuthRecord
-    ) -> Dict[str, str]:
-        token = auth.metadata.get("access_token")
-        if not token:
-            raise ValueError("missing access_token for openai subscription")
-        new_headers = dict(headers)
-        new_headers["Authorization"] = f"Bearer {token}"
-        return new_headers
-
-    def expiration(self, auth: AuthRecord) -> Optional[datetime]:
-        return auth.expiration_time()
-
-    def refresh_lead(self, auth: AuthRecord) -> Optional[timedelta]:
-        return self.refresh_lead_default
-
     def refresh(self, auth: AuthRecord, ctx: RequestContext) -> AuthRecord:
         refresh_token = auth.metadata.get("refresh_token")
         if not refresh_token:
             raise ValueError("missing refresh_token for openai subscription")
 
         try:
+            # OpenAI-specific: passes scopes param
             token = self._oauth().refresh_tokens(
                 refresh_token=refresh_token,
                 token_url=auth.attributes.get("token_url"),
@@ -118,23 +100,8 @@ class OpenAIChatGPTSubscriptionAdapter:
                 scopes=auth.attributes.get("scopes") or auth.attributes.get("scope"),
             )
         except Exception as e:
-            # Extract retry-after if available for rate limit handling
-            retry_after = None
-            response = getattr(e, "response", None)
-            if response is not None:
-                retry_after = getattr(response, "headers", {}).get("Retry-After")
-            if retry_after:
-                _logger.debug("OpenAI refresh rate limited, retry-after: %s", retry_after)
+            self._extract_retry_after(e)
             raise
 
-        if not token:
-            raise ValueError("refresh_tokens returned empty response for openai")
-
-        updated = auth.clone()
-        updated.metadata.update(token_dataclass_to_metadata(token))
-        updated.last_refreshed_at = datetime.now(timezone.utc)
-        updated.status = AuthStatus.ACTIVE
-        updated.unavailable = False
-        updated.status_message = ""
-        updated.next_refresh_after = None  # Clear pending refresh
-        return updated
+        self._validate_token(token)
+        return self._finalize_refresh(auth, token)

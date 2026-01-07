@@ -24,8 +24,8 @@ if os.getenv("LITELLM_OAUTH_DEBUG"):
 # Connection Pool for OAuth HTTP Clients
 # ---------------------------------------------------------------------------
 
-# Module-level pool: (proxy_url, timeout) -> httpx.Client
-_client_pool: Dict[Tuple[Optional[str], float], httpx.Client] = {}
+# Module-level pool: (proxy_url, timeout) -> (last_used_time, httpx.Client)
+_client_pool: Dict[Tuple[Optional[str], float], Tuple[float, httpx.Client]] = {}
 _pool_lock = threading.Lock()
 _pool_max_size = int(os.getenv("LITELLM_OAUTH_POOL_SIZE", "10"))
 
@@ -38,7 +38,7 @@ def get_pooled_client(
     Get or create a pooled HTTP client.
 
     Clients are keyed by (proxy_url, timeout) for reuse.
-    Thread-safe access via lock.
+    Thread-safe access via lock. Uses LRU eviction when pool is full.
 
     Args:
         timeout: Request timeout in seconds.
@@ -49,19 +49,23 @@ def get_pooled_client(
     """
     proxy_url = _resolve_proxy_url(proxy)
     key = (proxy_url, timeout)
+    now = time.time()
 
     with _pool_lock:
         if key in _client_pool:
-            return _client_pool[key]
+            # Update last used time and return existing client
+            _, client = _client_pool[key]
+            _client_pool[key] = (now, client)
+            return client
 
-        # Evict oldest if pool is full
+        # LRU eviction: remove least recently used if pool is full
         if len(_client_pool) >= _pool_max_size:
-            oldest_key = next(iter(_client_pool))
+            lru_key = min(_client_pool.keys(), key=lambda k: _client_pool[k][0])
             try:
-                _client_pool[oldest_key].close()
+                _client_pool[lru_key][1].close()
             except Exception:
                 pass
-            del _client_pool[oldest_key]
+            del _client_pool[lru_key]
 
         # Create new client
         if proxy_url:
@@ -71,14 +75,14 @@ def get_pooled_client(
             logger.debug("oauth_pool_new_client", extra={"timeout": timeout})
             client = httpx.Client(timeout=timeout)
 
-        _client_pool[key] = client
+        _client_pool[key] = (now, client)
         return client
 
 
 def close_client_pool() -> None:
     """Close all pooled clients. Called at module cleanup."""
     with _pool_lock:
-        for client in _client_pool.values():
+        for _, client in _client_pool.values():
             try:
                 client.close()
             except Exception:
@@ -248,13 +252,13 @@ def http_post_with_retry(
     attempt = 0
     last_exception: Optional[Exception] = None
     current_backoff = backoff_seconds
+    client = get_pooled_client(timeout=timeout, proxy=proxy)
 
     while attempt < max_attempts:
         attempt += 1
         start = time.monotonic()
         try:
-            with _build_client(timeout=timeout, proxy=proxy) as client:
-                resp = client.post(url, data=data, json=json, headers=headers)
+            resp = client.post(url, data=data, json=json, headers=headers)
             elapsed = time.monotonic() - start
             logger.debug(
                 "oauth_http_post",
@@ -337,13 +341,13 @@ def http_get_with_retry(
     attempt = 0
     last_exception: Optional[Exception] = None
     current_backoff = backoff_seconds
+    client = get_pooled_client(timeout=timeout, proxy=proxy)
 
     while attempt < max_attempts:
         attempt += 1
         start = time.monotonic()
         try:
-            with _build_client(timeout=timeout, proxy=proxy) as client:
-                resp = client.get(url, headers=headers, params=params)
+            resp = client.get(url, headers=headers, params=params)
             elapsed = time.monotonic() - start
             logger.debug(
                 "oauth_http_get",
@@ -361,6 +365,7 @@ def http_get_with_retry(
                 current_backoff = max(
                     current_backoff, min(float(retry_after), max_backoff_seconds)
                 )
+
         except (httpx.ConnectError, httpx.TimeoutException) as e:
             elapsed = time.monotonic() - start
             logger.debug(

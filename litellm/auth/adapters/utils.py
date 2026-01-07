@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict
+
+_logger = logging.getLogger(__name__)
 
 
 def token_dataclass_to_metadata(token: Any) -> Dict[str, Any]:
@@ -13,7 +16,9 @@ def token_dataclass_to_metadata(token: Any) -> Dict[str, Any]:
     """
     meta: Dict[str, Any] = {}
     if token is None:
+        _logger.warning("token_dataclass_to_metadata called with None token")
         return meta
+
 
     for key in (
         "access_token",

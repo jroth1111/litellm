@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Any, Dict, Optional
 
-from ..core import AuthRecord, AuthStatus, RequestContext
-from .base import AdapterCapabilities
+from ..core import AuthRecord, RequestContext
+from .base import AdapterCapabilities, BaseSubscriptionAdapter
 from .llms_oauth_loader import load_module
 from .utils import token_dataclass_to_metadata
 
 _logger = logging.getLogger(__name__)
 
 
-class AntigravitySubscriptionAdapter:
+class AntigravitySubscriptionAdapter(BaseSubscriptionAdapter):
+    """Antigravity (Google AI) subscription OAuth adapter."""
+    
     provider = "antigravity"
     supports_refresh = True
     refresh_lead_default = timedelta(minutes=5)
@@ -59,6 +61,8 @@ class AntigravitySubscriptionAdapter:
             code_verifier=code_verifier,
         )
         meta: Dict[str, Any] = token_dataclass_to_metadata(tokens)
+        
+        # Antigravity-specific: enrich with user info and project ID
         try:
             info = self._oauth().fetch_user_info(meta.get("access_token") or "")
             if isinstance(info, dict) and info.get("email"):
@@ -76,26 +80,11 @@ class AntigravitySubscriptionAdapter:
     def supports(self, model: str) -> bool:
         """Check if this adapter supports the given model.
         
-        Only matches models explicitly prefixed with 'antigravity/'.
+        Matches models starting with 'antigravity' (case-insensitive).
+        Examples: 'antigravity', 'antigravity/model', 'Antigravity-Pro'
         """
         lowered = (model or "").lower()
-        return lowered.startswith("antigravity/")
-
-    def prepare(
-        self, headers: Dict[str, str], ctx: RequestContext, auth: AuthRecord
-    ) -> Dict[str, str]:
-        token = auth.metadata.get("access_token")
-        if not token:
-            raise ValueError("missing access_token for antigravity subscription")
-        new_headers = dict(headers)
-        new_headers["Authorization"] = f"Bearer {token}"
-        return new_headers
-
-    def expiration(self, auth: AuthRecord) -> Optional[datetime]:
-        return auth.expiration_time()
-
-    def refresh_lead(self, auth: AuthRecord) -> Optional[timedelta]:
-        return self.refresh_lead_default
+        return lowered.startswith("antigravity")
 
     def refresh(self, auth: AuthRecord, ctx: RequestContext) -> AuthRecord:
         refresh_token = auth.metadata.get("refresh_token")
@@ -110,23 +99,8 @@ class AntigravitySubscriptionAdapter:
                 client_secret=auth.attributes.get("client_secret"),
             )
         except Exception as e:
-            # Extract retry-after if available for rate limit handling
-            retry_after = None
-            response = getattr(e, "response", None)
-            if response is not None:
-                retry_after = getattr(response, "headers", {}).get("Retry-After")
-            if retry_after:
-                _logger.debug("Antigravity refresh rate limited, retry-after: %s", retry_after)
+            self._extract_retry_after(e)
             raise
 
-        if not token:
-            raise ValueError("refresh_tokens returned empty response for antigravity")
-
-        updated = auth.clone()
-        updated.metadata.update(token_dataclass_to_metadata(token))
-        updated.last_refreshed_at = datetime.now(timezone.utc)
-        updated.status = AuthStatus.ACTIVE
-        updated.unavailable = False
-        updated.status_message = ""
-        updated.next_refresh_after = None  # Clear pending refresh
-        return updated
+        self._validate_token(token)
+        return self._finalize_refresh(auth, token)
