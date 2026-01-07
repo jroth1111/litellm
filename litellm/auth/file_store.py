@@ -28,6 +28,12 @@ from .crypto import (
 
 _logger = logging.getLogger(__name__)
 
+__all__ = [
+    "AuthLoadError",
+    "JsonFileAuthStore",
+    "EncryptedJsonFileAuthStore",
+]
+
 
 @dataclass(frozen=True)
 class AuthLoadError:
@@ -88,7 +94,10 @@ def _exclusive_file_lock(lock_path: str, *, timeout_seconds: float = 10.0) -> It
                         time.sleep(0.05)
             except Exception:
                 # No usable locking backend; proceed without lock.
-                pass
+                _logger.warning(
+                    "No file locking available; concurrent writes may cause data loss: %s",
+                    lock_path,
+                )
 
         yield
     finally:

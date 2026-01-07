@@ -12,6 +12,18 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Protocol
 
+__all__ = [
+    "AuthStatus",
+    "QuotaState",
+    "ModelState",
+    "AuthRecord",
+    "RequestContext",
+    "AuthStore",
+    "AuthStrategy",
+    "expiration_from_metadata",
+    "merge_aliases",
+]
+
 
 class AuthStatus(str, Enum):
     """Lifecycle state for a credential or per-model binding."""

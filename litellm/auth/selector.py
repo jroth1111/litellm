@@ -11,6 +11,7 @@ prioritizes:
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -25,6 +26,16 @@ from .core import (
     QuotaState,
     RequestContext,
 )
+
+__all__ = [
+    "AuthSelectionResult",
+    "Selector",
+    "CredentialSelector",
+    "interpret_status_code",
+    "retry_after_from_exception",
+]
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -110,8 +121,8 @@ class CredentialSelector:
                     data = json.load(f)
                     if isinstance(data, dict):
                         return {k: int(v) for k, v in data.items() if isinstance(v, int)}
-        except Exception:
-            pass
+        except Exception as e:
+            _logger.debug("Failed to load rotation offsets from %s: %s", self.offset_store_path, e)
         return {}
 
     def _save_offsets(self) -> None:
@@ -125,8 +136,8 @@ class CredentialSelector:
                 os.makedirs(parent, exist_ok=True)
             with open(self.offset_store_path, "w") as f:
                 json.dump(self.provider_offsets, f)
-        except Exception:
-            pass  # Best-effort persistence; don't fail requests
+        except Exception as e:
+            _logger.debug("Failed to save rotation offsets to %s: %s", self.offset_store_path, e)
 
     def select(
         self,

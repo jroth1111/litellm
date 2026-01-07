@@ -4,7 +4,7 @@ Authenticated encryption helpers for persisting OAuth subscription tokens.
 Design goals:
 - No new mandatory dependencies: prefer `cryptography` when present, fall back to
   `pynacl` when present, otherwise fail loudly.
-- Deterministic key derivation from an operator-provided secret.
+- Secure key derivation using PBKDF2-HMAC-SHA256 (OWASP 2023 recommendations).
 - Self-describing on-disk wrapper so we can change algorithms later.
 """
 
@@ -13,9 +13,25 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 from dataclasses import dataclass
 from typing import Literal, Optional, Protocol
+
+__all__ = [
+    "AuthEncryptionError",
+    "resolve_auth_encryption_secret",
+    "build_encryptor",
+    "encrypt_bytes",
+    "decrypt_bytes",
+]
+
+_logger = logging.getLogger(__name__)
+
+# PBKDF2 parameters per OWASP 2023 recommendations
+# https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html
+_KDF_ITERATIONS = 600_000
+_KDF_SALT = b"litellm-auth-v2"  # Static salt for deterministic derivation
 
 
 class AuthEncryptionError(RuntimeError):
@@ -47,9 +63,18 @@ def resolve_auth_encryption_secret(explicit: Optional[str] = None) -> str:
 
 def _derive_key_bytes(secret: str) -> bytes:
     """
-    Derive 32 bytes from an arbitrary secret string.
+    Derive 32 bytes from an arbitrary secret string using PBKDF2-HMAC-SHA256.
+
+    Uses OWASP 2023 recommended iteration count (600,000) for security against
+    brute-force attacks on weak secrets.
     """
-    return hashlib.sha256(secret.encode("utf-8")).digest()
+    return hashlib.pbkdf2_hmac(
+        "sha256",
+        secret.encode("utf-8"),
+        _KDF_SALT,
+        _KDF_ITERATIONS,
+        dklen=32,
+    )
 
 
 class _Encryptor(Protocol):
@@ -146,6 +171,7 @@ def encrypt_bytes(plaintext: bytes, *, encryptor: _Encryptor) -> bytes:
 
 
 def decrypt_bytes(ciphertext: bytes, *, secret: str) -> bytes:
+    """Decrypt an encrypted auth record."""
     try:
         env = json.loads(ciphertext.decode("utf-8"))
     except Exception as e:
@@ -156,7 +182,10 @@ def decrypt_bytes(ciphertext: bytes, *, secret: str) -> bytes:
     ct = env.get("ct")
     if not alg or not isinstance(ct, str) or not ct:
         raise AuthEncryptionError("Invalid encrypted auth record: missing fields")
-    encryptor = build_encryptor(secret, preferred=alg if alg in ("fernet", "secretbox") else None)  # type: ignore[arg-type]
+
+    encryptor = build_encryptor(
+        secret, preferred=alg if alg in ("fernet", "secretbox") else None
+    )  # type: ignore[arg-type]
     if encryptor.alg == "fernet":
         token = ct.encode("utf-8")
     else:
@@ -165,4 +194,3 @@ def decrypt_bytes(ciphertext: bytes, *, secret: str) -> bytes:
         return encryptor.decrypt(token)
     except Exception as e:
         raise AuthEncryptionError("Failed to decrypt auth record (wrong key?)") from e
-
