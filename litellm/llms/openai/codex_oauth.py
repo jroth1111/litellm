@@ -24,11 +24,13 @@ Usage:
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlencode
 
 import logging
@@ -49,10 +51,12 @@ OPENAI_SCOPES = os.getenv("OPENAI_SCOPES", "openid email profile offline_access"
 OPENAI_EXPECTED_ISSUER = os.getenv("OPENAI_EXPECTED_ISSUER", "https://auth.openai.com")
 OPENAI_JWKS_URL = os.getenv("OPENAI_JWKS_URL", f"{OPENAI_EXPECTED_ISSUER}/.well-known/jwks.json")
 
-_JWKS_CACHE: dict[str, tuple[float, dict]] = {}
+# JWKS cache with bounded size (max 10 entries)
+_JWKS_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_JWKS_CACHE_MAX_SIZE = 10
 
 
-def _fetch_jwks(*, jwks_url: str, timeout: float = 10.0, cache_ttl_seconds: int = 3600) -> dict:
+def _fetch_jwks(*, jwks_url: str, timeout: float = 10.0, cache_ttl_seconds: int = 3600) -> Dict[str, Any]:
     now = time.time()
     cached = _JWKS_CACHE.get(jwks_url)
     if cached is not None:
@@ -71,8 +75,26 @@ def _fetch_jwks(*, jwks_url: str, timeout: float = 10.0, cache_ttl_seconds: int 
     jwks = resp.json()
     if not isinstance(jwks, dict) or "keys" not in jwks:
         raise OpenAIAuthError("jwks_invalid", "JWKS response missing keys")
+    # Bound cache size
+    if len(_JWKS_CACHE) >= _JWKS_CACHE_MAX_SIZE:
+        # Remove oldest entry
+        oldest_key = min(_JWKS_CACHE.keys(), key=lambda k: _JWKS_CACHE[k][0])
+        del _JWKS_CACHE[oldest_key]
     _JWKS_CACHE[jwks_url] = (now, jwks)
     return jwks
+
+
+def _parse_id_token_claims(id_token: str) -> Dict[str, Any]:
+    """Extract claims from ID token payload (base64 decode middle part)."""
+    parts = id_token.split(".")
+    if len(parts) < 2:
+        return {}
+    payload = parts[1]
+    # Add padding if necessary
+    padding = 4 - (len(payload) % 4)
+    if padding != 4:
+        payload += "=" * padding
+    return json.loads(base64.urlsafe_b64decode(payload))
 
 
 @dataclass
@@ -214,23 +236,13 @@ def exchange_code_for_tokens(
                 "(expired, wrong issuer, or wrong audience). Claims will not be extracted."
             )
         else:
-            # Simple JWT payload extraction (base64 decode middle part)
             try:
-                import base64
-                import json as json_module
-                parts = id_token.split(".")
-                if len(parts) >= 2:
-                    # Add padding if necessary
-                    payload = parts[1]
-                    padding = 4 - (len(payload) % 4)
-                    if padding != 4:
-                        payload += "=" * padding
-                    claims = json_module.loads(base64.urlsafe_b64decode(payload))
-                    email = claims.get("email")
-                    # Try different account ID fields
-                    account_id = claims.get("sub") or claims.get("account_id")
-            except Exception:
-                pass  # ID token parsing is best-effort
+                claims = _parse_id_token_claims(id_token)
+                email = claims.get("email")
+                # Try different account ID fields
+                account_id = claims.get("sub") or claims.get("account_id")
+            except Exception as e:
+                logger.debug("Failed to parse OpenAI ID token claims: %s", e)
     
     return OpenAITokenData(
         access_token=result["access_token"],
@@ -323,19 +335,12 @@ def refresh_tokens(
             )
         else:
             try:
-                import base64
-                import json as json_module
-                parts = id_token.split(".")
-                if len(parts) >= 2:
-                    payload = parts[1]
-                    padding = 4 - (len(payload) % 4)
-                    if padding != 4:
-                        payload += "=" * padding
-                    claims = json_module.loads(base64.urlsafe_b64decode(payload))
-                    email = claims.get("email")
-                    account_id = claims.get("sub") or claims.get("account_id")
-            except Exception:
-                pass
+                claims = _parse_id_token_claims(id_token)
+                email = claims.get("email")
+                account_id = claims.get("sub") or claims.get("account_id")
+            except Exception as e:
+                logger.debug("Failed to parse OpenAI ID token claims on refresh: %s", e)
+
 
     return OpenAITokenData(
         access_token=result["access_token"],

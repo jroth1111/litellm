@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
@@ -7,6 +8,8 @@ from ..core import AuthRecord, AuthStatus, RequestContext
 from .base import AdapterCapabilities
 from .llms_oauth_loader import load_module
 from .utils import token_dataclass_to_metadata
+
+_logger = logging.getLogger(__name__)
 
 
 class AntigravitySubscriptionAdapter:
@@ -60,19 +63,23 @@ class AntigravitySubscriptionAdapter:
             info = self._oauth().fetch_user_info(meta.get("access_token") or "")
             if isinstance(info, dict) and info.get("email"):
                 meta["email"] = info.get("email")
-        except Exception:
-            pass
+        except Exception as e:
+            _logger.debug("Failed to fetch user info for antigravity: %s", e)
         try:
             proj = self._oauth().fetch_project_id(meta.get("access_token") or "")
             if proj:
                 meta["project_id"] = proj
-        except Exception:
-            pass
+        except Exception as e:
+            _logger.debug("Failed to fetch project_id for antigravity: %s", e)
         return meta
 
     def supports(self, model: str) -> bool:
+        """Check if this adapter supports the given model.
+        
+        Only matches models explicitly prefixed with 'antigravity/'.
+        """
         lowered = (model or "").lower()
-        return lowered.startswith("antigravity/") or "antigravity" in lowered
+        return lowered.startswith("antigravity/")
 
     def prepare(
         self, headers: Dict[str, str], ctx: RequestContext, auth: AuthRecord
@@ -95,17 +102,31 @@ class AntigravitySubscriptionAdapter:
         if not refresh_token:
             raise ValueError("missing refresh_token for antigravity subscription")
 
-        token = self._oauth().refresh_tokens(
-            refresh_token=refresh_token,
-            token_url=auth.attributes.get("token_url"),
-            client_id=auth.attributes.get("client_id"),
-            client_secret=auth.attributes.get("client_secret"),
-        )
+        try:
+            token = self._oauth().refresh_tokens(
+                refresh_token=refresh_token,
+                token_url=auth.attributes.get("token_url"),
+                client_id=auth.attributes.get("client_id"),
+                client_secret=auth.attributes.get("client_secret"),
+            )
+        except Exception as e:
+            # Extract retry-after if available for rate limit handling
+            retry_after = None
+            response = getattr(e, "response", None)
+            if response is not None:
+                retry_after = getattr(response, "headers", {}).get("Retry-After")
+            if retry_after:
+                _logger.debug("Antigravity refresh rate limited, retry-after: %s", retry_after)
+            raise
+
+        if not token:
+            raise ValueError("refresh_tokens returned empty response for antigravity")
+
         updated = auth.clone()
         updated.metadata.update(token_dataclass_to_metadata(token))
         updated.last_refreshed_at = datetime.now(timezone.utc)
         updated.status = AuthStatus.ACTIVE
         updated.unavailable = False
         updated.status_message = ""
+        updated.next_refresh_after = None  # Clear pending refresh
         return updated
-

@@ -13,9 +13,10 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import dataclass
+import tempfile
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable, List, Optional, Protocol, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence, Tuple
 
 from .alias import ModelAliasMap
 from .core import (
@@ -38,8 +39,9 @@ __all__ = [
 _logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class AuthSelectionResult:
+    """Result of credential selection with the chosen auth record and model."""
     auth: AuthRecord
     provider_model: str
 
@@ -106,12 +108,15 @@ class CredentialSelector:
     ) -> None:
         self.alias_map = alias_map or ModelAliasMap()
         self.offset_store_path = offset_store_path
-        self.provider_offsets: dict[str, int] = self._load_offsets()
+        self.provider_offsets: Dict[str, int] = self._load_offsets()
         self.disable_quota_cooldown = disable_quota_cooldown
         self.provider_quota_cooldown_overrides = provider_quota_cooldown_overrides or {}
         self.model_quota_cooldown_overrides = model_quota_cooldown_overrides or {}
+        self._offset_dirty = False
+        self._selection_count = 0
+        self._offset_persist_interval = 50  # Persist every N selections
 
-    def _load_offsets(self) -> dict[str, int]:
+    def _load_offsets(self) -> Dict[str, int]:
         """Load rotation offsets from file if configured."""
         if not self.offset_store_path:
             return {}
@@ -125,19 +130,48 @@ class CredentialSelector:
             _logger.debug("Failed to load rotation offsets from %s: %s", self.offset_store_path, e)
         return {}
 
-    def _save_offsets(self) -> None:
-        """Persist rotation offsets to file if configured."""
+    def _save_offsets(self, force: bool = False) -> None:
+        """Persist rotation offsets to file if configured.
+        
+        Uses atomic writes to prevent corruption. Debounces writes to reduce I/O.
+        Always persists on first selection to maintain offset continuity.
+        """
         if not self.offset_store_path:
             return
+        if not force and not self._offset_dirty:
+            return
+        # Debounce: persist on first selection (count=1), then every N selections
+        if not force and self._selection_count > 1 and self._selection_count % self._offset_persist_interval != 0:
+            return
+
         try:
             # Ensure parent directory exists
             parent = os.path.dirname(self.offset_store_path)
             if parent and not os.path.exists(parent):
                 os.makedirs(parent, exist_ok=True)
-            with open(self.offset_store_path, "w") as f:
-                json.dump(self.provider_offsets, f)
+            # Atomic write: write to temp file, then rename
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=".offset.", dir=parent or ".", suffix=".tmp"
+            )
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(self.provider_offsets, f)
+                os.replace(tmp_path, self.offset_store_path)
+                self._offset_dirty = False
+            finally:
+                # Clean up temp file if rename failed
+                if os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except Exception:
+                        pass
         except Exception as e:
             _logger.debug("Failed to save rotation offsets to %s: %s", self.offset_store_path, e)
+
+    def flush_offsets(self) -> None:
+        """Force-persist any pending offset changes. Call on shutdown."""
+        self._save_offsets(force=True)
+
 
     def select(
         self,
@@ -251,7 +285,10 @@ class CredentialSelector:
 
         if not rotated:
             rotated = sorted(candidates, key=sort_key)
-        # Persist offset updates (best-effort)
+        # Mark offsets dirty and increment selection count
+        self._offset_dirty = True
+        self._selection_count += 1
+        # Persist offset updates (debounced)
         self._save_offsets()
         return rotated[0]
 
@@ -270,6 +307,7 @@ class CredentialSelector:
         updated.status = AuthStatus.ACTIVE
         updated.unavailable = False
         updated.next_retry_after = None
+        updated.next_refresh_after = None  # Clear any pending refresh
         updated.status_message = ""
         updated.quota = QuotaState(exceeded=False)
         state = updated.model_states.get(provider_model) or ModelState()
