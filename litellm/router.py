@@ -77,6 +77,7 @@ from litellm.router_utils.add_retry_fallback_headers import (
     add_fallback_headers_to_response,
     add_retry_headers_to_response,
 )
+from litellm.router_utils.auth_rotation_handler import AuthRotationHandler
 from litellm.router_utils.batch_utils import (
     _get_router_metadata_variable_name,
     replace_model_in_jsonl,
@@ -1311,9 +1312,8 @@ class Router:
     def _completion(
         self, model: str, messages: List[Dict[str, str]], **kwargs
     ) -> Union[ModelResponse, CustomStreamWrapper]:
-        auth_selection: Optional[_AuthSelectionCtx] = None
+        auth_handler: Optional[AuthRotationHandler] = None
         model_name: Optional[str] = None
-        marked_failure_for_raised_exception = False
         try:
             deployment = self.get_available_deployment(
                 model=model,
@@ -1335,38 +1335,18 @@ class Router:
             if not self.has_model_id(model):
                 self.routing_strategy_pre_call_checks(deployment=deployment)
 
-            auth_records = kwargs.get("auth_records")
-            all_auth_records: Optional[List[Any]]
-            if auth_records is None:
-                all_auth_records = None
-            elif isinstance(auth_records, list):
-                all_auth_records = auth_records
-            else:
-                try:
-                    all_auth_records = list(auth_records)
-                    kwargs["auth_records"] = all_auth_records
-                except Exception:
-                    all_auth_records = None
-
-            attempted_auth_ids: set[str] = set()
-            refreshed_auth_ids: set[str] = set()
-            max_auth_attempts = (
-                len(all_auth_records)
-                if (self.auth_selector is not None and all_auth_records)
-                else 0
+            auth_handler = AuthRotationHandler(
+                router=self,
+                model=model,
+                deployment=deployment,
+                kwargs=kwargs,
+                requires_subscription=requires_subscription,
+                model_name=model_name,
             )
-
-            def _replace_auth_record(updated: Any) -> None:
-                if not all_auth_records:
-                    return
-                updated_id = getattr(updated, "id", None)
-                for idx, rec in enumerate(all_auth_records):
-                    if getattr(rec, "id", None) == updated_id:
-                        all_auth_records[idx] = updated
-                        return
 
             def _finalize_success(
                 resp: Union[ModelResponse, CustomStreamWrapper],
+                auth_selection: Optional[_AuthSelectionCtx],
             ) -> Union[ModelResponse, CustomStreamWrapper]:
                 if auth_selection:
                     self.auth_metrics.record_call(auth_selection.selection.auth.provider)
@@ -1389,170 +1369,57 @@ class Router:
                         )
                 return resp
 
-            while True:
-                if attempted_auth_ids and all_auth_records is not None:
-                    kwargs["auth_records"] = [
-                        rec
-                        for rec in all_auth_records
-                        if getattr(rec, "id", None) not in attempted_auth_ids
-                    ]
-
-                auth_selection = self._maybe_select_auth(
-                    model=model, deployment=deployment, kwargs=kwargs
+            def _do_call() -> Union[ModelResponse, CustomStreamWrapper]:
+                potential_model_client = self._get_client(
+                    deployment=deployment, kwargs=kwargs
                 )
-
-                if auth_selection is None:
-                    if requires_subscription:
-                        raise litellm.RateLimitError(
-                            message=f"no healthy subscription credentials available for {model}",
-                            llm_provider=_model_provider(model_name) or "",
-                            model=model_name,
-                        )
-                    strategy = None
+                dynamic_api_key = kwargs.get("api_key", None)
+                if (
+                    dynamic_api_key is not None
+                    and potential_model_client is not None
+                    and dynamic_api_key != potential_model_client.api_key
+                ):
+                    model_client = None
                 else:
-                    self._log_auth_identity(auth_selection)
-                    strategy = self._auth_strategy_for(
-                        auth_selection.selection.auth.provider
-                    )
-                    try:
-                        auth_selection = self._prepare_auth_headers(
-                            auth_ctx=auth_selection,
-                            strategy=strategy,
-                            model=model,
-                            kwargs=kwargs,
-                        )
-                    except Exception as header_error:
-                        if auth_selection is not None and max_auth_attempts > 0:
-                            updated = self._mark_auth_failure(
-                                auth_selection, header_error
-                            )
-                            if updated is not None:
-                                _replace_auth_record(updated)
-                            attempted_auth_ids.add(auth_selection.selection.auth.id)
-                            if len(attempted_auth_ids) >= max_auth_attempts:
-                                marked_failure_for_raised_exception = True
-                                raise
-                            continue
-                        raise
+                    model_client = potential_model_client
 
-                    try:
-                        self._check_subscription_ratelimit(auth_selection)
-                    except Exception as e:
-                        status_code = interpret_status_code(e)
-                        if (
-                            status_code == 429
-                            and auth_selection is not None
-                            and max_auth_attempts > 0
-                        ):
-                            updated = self._mark_auth_failure(auth_selection, e)
-                            if updated is not None:
-                                _replace_auth_record(updated)
-                            attempted_auth_ids.add(auth_selection.selection.auth.id)
-                            if len(attempted_auth_ids) >= max_auth_attempts:
-                                marked_failure_for_raised_exception = True
-                                raise
-                            continue
-                        raise
+                sanitized_kwargs = {
+                    key: value
+                    for key, value in kwargs.items()
+                    if key not in ("auth_records", "auth_store", "auth_namespace")
+                }
 
-                def _do_call() -> Union[ModelResponse, CustomStreamWrapper]:
-                    potential_model_client = self._get_client(
-                        deployment=deployment, kwargs=kwargs
-                    )
-                    dynamic_api_key = kwargs.get("api_key", None)
-                    if (
-                        dynamic_api_key is not None
-                        and potential_model_client is not None
-                        and dynamic_api_key != potential_model_client.api_key
-                    ):
-                        model_client = None
-                    else:
-                        model_client = potential_model_client
-
-                    sanitized_kwargs = {
-                        key: value
-                        for key, value in kwargs.items()
-                        if key not in ("auth_records", "auth_store", "auth_namespace")
+                resp = litellm.completion(
+                    **{
+                        **data,
+                        "messages": messages,
+                        "caching": self.cache_responses,
+                        "client": model_client,
+                        **sanitized_kwargs,
                     }
+                )
+                if (
+                    self.auth_streaming_prefetch_first_chunk
+                    and auth_handler is not None
+                    and auth_handler.auth_selection is not None
+                    and auth_handler.max_auth_attempts > 0
+                    and isinstance(resp, CustomStreamWrapper)
+                ):
+                    first_chunk = next(resp)
+                    return _PrefetchedStreamWrapper(first_chunk, resp)
+                return resp
 
-                    resp = litellm.completion(
-                        **{
-                            **data,
-                            "messages": messages,
-                            "caching": self.cache_responses,
-                            "client": model_client,
-                            **sanitized_kwargs,
-                        }
-                    )
-                    if (
-                        self.auth_streaming_prefetch_first_chunk
-                        and auth_selection is not None
-                        and max_auth_attempts > 0
-                        and isinstance(resp, CustomStreamWrapper)
-                    ):
-                        first_chunk = next(resp)
-                        return _PrefetchedStreamWrapper(first_chunk, resp)
-                    return resp
-
-                try:
-                    response = _do_call()
-                except Exception as e:
-                    status_code = interpret_status_code(e)
-                    if (
-                        strategy is not None
-                        and getattr(strategy, "supports_refresh", True)
-                        and auth_selection is not None
-                        and status_code in (401, 403)
-                        and auth_selection.selection.auth.id not in refreshed_auth_ids
-                    ):
-                        refreshed_auth_ids.add(auth_selection.selection.auth.id)
-                        try:
-                            auth_selection = self._maybe_refresh_auth(
-                                auth_selection,
-                                strategy,
-                                RequestContext(
-                                    model=model,
-                                    user_id=kwargs.get("user"),
-                                    team_id=kwargs.get("team"),
-                                    metadata=kwargs.get("metadata", {}),
-                                ),
-                            )
-                            auth_selection = self._prepare_auth_headers(
-                                auth_ctx=auth_selection,
-                                strategy=strategy,
-                                model=model,
-                                kwargs=kwargs,
-                            )
-                        except Exception as refresh_exc:
-                            # Treat refresh failures as auth failure and rotate if possible.
-                            e = refresh_exc
-                            status_code = status_code or interpret_status_code(refresh_exc)
-                        else:
-                            try:
-                                response = _do_call()
-                            except Exception as refresh_error:
-                                e = refresh_error
-                                status_code = interpret_status_code(refresh_error)
-                            else:
-                                return _finalize_success(response)
-
-                    if (
-                        strategy is not None
-                        and auth_selection is not None
-                        and self._should_rotate_on_auth_error(e, status_code)
-                        and max_auth_attempts > 0
-                    ):
-                        updated = self._mark_auth_failure(auth_selection, e)
-                        if updated is not None:
-                            _replace_auth_record(updated)
-                        attempted_auth_ids.add(auth_selection.selection.auth.id)
-                        if len(attempted_auth_ids) >= max_auth_attempts:
-                            marked_failure_for_raised_exception = True
-                            raise
-                        continue
-                    raise
-
-                return _finalize_success(response)
+            response = auth_handler.run_sync(_do_call)
+            return _finalize_success(response, auth_handler.auth_selection)
         except Exception as e:
+            auth_selection = (
+                auth_handler.auth_selection if auth_handler is not None else None
+            )
+            marked_failure_for_raised_exception = (
+                auth_handler.marked_failure_for_raised_exception
+                if auth_handler is not None
+                else False
+            )
             if auth_selection is not None and not marked_failure_for_raised_exception:
                 self._mark_auth_failure(auth_selection, e)
             verbose_router_logger.info(
@@ -1781,8 +1648,7 @@ class Router:
         - in the semaphore,  make a check against it's local rpm before running
         """
         model_name = None
-        auth_selection: Optional[_AuthSelectionCtx] = None
-        marked_failure_for_raised_exception = False
+        auth_handler: Optional[AuthRotationHandler] = None
         _timeout_debug_deployment_dict = (
             {}
         )  # this is a temporary dict to debug timeout issues
@@ -1829,35 +1695,14 @@ class Router:
 
             self.total_calls[model_name] += 1
 
-            auth_records = kwargs.get("auth_records")
-            all_auth_records: Optional[List[Any]]
-            if auth_records is None:
-                all_auth_records = None
-            elif isinstance(auth_records, list):
-                all_auth_records = auth_records
-            else:
-                try:
-                    all_auth_records = list(auth_records)
-                    kwargs["auth_records"] = all_auth_records
-                except Exception:
-                    all_auth_records = None
-
-            attempted_auth_ids: set[str] = set()
-            refreshed_auth_ids: set[str] = set()
-            max_auth_attempts = (
-                len(all_auth_records)
-                if (self.auth_selector is not None and all_auth_records)
-                else 0
+            auth_handler = AuthRotationHandler(
+                router=self,
+                model=model,
+                deployment=deployment,
+                kwargs=kwargs,
+                requires_subscription=requires_subscription,
+                model_name=model_name,
             )
-
-            def _replace_auth_record(updated: Any) -> None:
-                if not all_auth_records:
-                    return
-                updated_id = getattr(updated, "id", None)
-                for idx, rec in enumerate(all_auth_records):
-                    if getattr(rec, "id", None) == updated_id:
-                        all_auth_records[idx] = updated
-                        return
 
             async def _do_call() -> Union[ModelResponse, CustomStreamWrapper]:
                 model_client = self._get_async_openai_model_client(
@@ -1879,141 +1724,14 @@ class Router:
                 resp = await litellm.acompletion(**input_kwargs)
                 if (
                     self.auth_streaming_prefetch_first_chunk
-                    and auth_selection is not None
-                    and max_auth_attempts > 0
+                    and auth_handler is not None
+                    and auth_handler.auth_selection is not None
+                    and auth_handler.max_auth_attempts > 0
                     and isinstance(resp, CustomStreamWrapper)
                 ):
                     first_chunk = await resp.__anext__()
                     return _PrefetchedStreamWrapper(first_chunk, resp)
                 return resp
-
-            async def _call_with_auth_rotation() -> Union[ModelResponse, CustomStreamWrapper]:
-                nonlocal auth_selection, marked_failure_for_raised_exception
-                while True:
-                    if attempted_auth_ids and all_auth_records is not None:
-                        kwargs["auth_records"] = [
-                            rec
-                            for rec in all_auth_records
-                            if getattr(rec, "id", None) not in attempted_auth_ids
-                        ]
-
-                    auth_selection = self._maybe_select_auth(
-                        model=model, deployment=deployment, kwargs=kwargs
-                    )
-
-                    if auth_selection is None:
-                        if requires_subscription:
-                            raise litellm.RateLimitError(
-                                message=f"no healthy subscription credentials available for {model}",
-                                llm_provider=_model_provider(model_name) or "",
-                                model=model_name,
-                            )
-                        strategy = None
-                    else:
-                        self._log_auth_identity(auth_selection)
-                        strategy = self._auth_strategy_for(
-                            auth_selection.selection.auth.provider
-                        )
-                        try:
-                            auth_selection = self._prepare_auth_headers(
-                                auth_ctx=auth_selection,
-                                strategy=strategy,
-                                model=model,
-                                kwargs=kwargs,
-                            )
-                        except Exception as header_error:
-                            if auth_selection is not None and max_auth_attempts > 0:
-                                updated = self._mark_auth_failure(
-                                    auth_selection, header_error
-                                )
-                                if updated is not None:
-                                    _replace_auth_record(updated)
-                                attempted_auth_ids.add(auth_selection.selection.auth.id)
-                                if len(attempted_auth_ids) >= max_auth_attempts:
-                                    marked_failure_for_raised_exception = True
-                                    raise
-                                continue
-                            raise
-
-                        try:
-                            self._check_subscription_ratelimit(auth_selection)
-                        except Exception as e:
-                            status_code = interpret_status_code(e)
-                            if (
-                                status_code == 429
-                                and auth_selection is not None
-                                and max_auth_attempts > 0
-                            ):
-                                updated = self._mark_auth_failure(auth_selection, e)
-                                if updated is not None:
-                                    _replace_auth_record(updated)
-                                attempted_auth_ids.add(auth_selection.selection.auth.id)
-                                if len(attempted_auth_ids) >= max_auth_attempts:
-                                    marked_failure_for_raised_exception = True
-                                    raise
-                                continue
-                            raise
-
-                    try:
-                        response = await _do_call()
-                    except Exception as e:
-                        status_code = interpret_status_code(e)
-                        if (
-                            strategy is not None
-                            and getattr(strategy, "supports_refresh", True)
-                            and auth_selection is not None
-                            and status_code in (401, 403)
-                            and auth_selection.selection.auth.id
-                            not in refreshed_auth_ids
-                        ):
-                            refreshed_auth_ids.add(auth_selection.selection.auth.id)
-                            try:
-                                auth_selection = self._maybe_refresh_auth(
-                                    auth_selection,
-                                    strategy,
-                                    RequestContext(
-                                        model=model,
-                                        user_id=kwargs.get("user"),
-                                        team_id=kwargs.get("team"),
-                                        metadata=kwargs.get("metadata", {}),
-                                    ),
-                                )
-                                auth_selection = self._prepare_auth_headers(
-                                    auth_ctx=auth_selection,
-                                    strategy=strategy,
-                                    model=model,
-                                    kwargs=kwargs,
-                                )
-                            except Exception as refresh_exc:
-                                e = refresh_exc
-                                status_code = status_code or interpret_status_code(
-                                    refresh_exc
-                                )
-                            else:
-                                try:
-                                    response = await _do_call()
-                                except Exception as refresh_error:
-                                    e = refresh_error
-                                    status_code = interpret_status_code(refresh_error)
-                                else:
-                                    return response
-
-                        if (
-                            strategy is not None
-                            and auth_selection is not None
-                            and self._should_rotate_on_auth_error(e, status_code)
-                            and max_auth_attempts > 0
-                        ):
-                            updated = self._mark_auth_failure(auth_selection, e)
-                            if updated is not None:
-                                _replace_auth_record(updated)
-                            attempted_auth_ids.add(auth_selection.selection.auth.id)
-                            if len(attempted_auth_ids) >= max_auth_attempts:
-                                marked_failure_for_raised_exception = True
-                                raise
-                            continue
-                        raise
-                    return response
 
             logging_obj: Optional[LiteLLMLogging] = kwargs.get(
                 "litellm_logging_obj", None
@@ -2034,7 +1752,7 @@ class Router:
                             logging_obj=logging_obj,
                             parent_otel_span=parent_otel_span,
                         )
-                        return await _call_with_auth_rotation()
+                        return await auth_handler.run_async(_do_call)
 
                     response = await _run_call()
             else:
@@ -2043,7 +1761,7 @@ class Router:
                     logging_obj=logging_obj,
                     parent_otel_span=parent_otel_span,
                 )
-                response = await _call_with_auth_rotation()
+                response = await auth_handler.run_async(_do_call)
 
             ## CHECK CONTENT FILTER ERROR ##
             if isinstance(response, ModelResponse):
@@ -2061,8 +1779,10 @@ class Router:
             verbose_router_logger.info(
                 f"litellm.acompletion(model={model_name})\033[32m 200 OK\033[0m"
             )
-            if auth_selection:
-                self.auth_metrics.record_call(auth_selection.selection.auth.provider)
+            if auth_handler is not None and auth_handler.auth_selection:
+                self.auth_metrics.record_call(
+                    auth_handler.auth_selection.selection.auth.provider
+                )
             # debug how often this deployment picked
             self._track_deployment_metrics(
                 deployment=deployment,
@@ -2071,16 +1791,16 @@ class Router:
             )
 
             if isinstance(response, CustomStreamWrapper):
-                if auth_selection is not None:
-                    self._mark_auth_success(auth_selection)
+                if auth_handler is not None and auth_handler.auth_selection is not None:
+                    self._mark_auth_success(auth_handler.auth_selection)
                 return await self._acompletion_streaming_iterator(
                     model_response=response,
                     messages=messages,
                     initial_kwargs=input_kwargs_for_streaming_fallback,
                 )
 
-            if auth_selection is not None:
-                self._mark_auth_success(auth_selection)
+            if auth_handler is not None and auth_handler.auth_selection is not None:
+                self._mark_auth_success(auth_handler.auth_selection)
             return response
         except litellm.Timeout as e:
             deployment_request_timeout_param = _timeout_debug_deployment_dict.get(
@@ -2090,10 +1810,26 @@ class Router:
                 "litellm_params", {}
             ).get("timeout", None)
             e.message += f"\n\nDeployment Info: request_timeout: {deployment_request_timeout_param}\ntimeout: {deployment_timeout_param}"
+            auth_selection = (
+                auth_handler.auth_selection if auth_handler is not None else None
+            )
+            marked_failure_for_raised_exception = (
+                auth_handler.marked_failure_for_raised_exception
+                if auth_handler is not None
+                else False
+            )
             if auth_selection is not None and not marked_failure_for_raised_exception:
                 self._mark_auth_failure(auth_selection, e)
             raise e
         except Exception as e:
+            auth_selection = (
+                auth_handler.auth_selection if auth_handler is not None else None
+            )
+            marked_failure_for_raised_exception = (
+                auth_handler.marked_failure_for_raised_exception
+                if auth_handler is not None
+                else False
+            )
             if auth_selection is not None and not marked_failure_for_raised_exception:
                 self._mark_auth_failure(auth_selection, e)
             verbose_router_logger.info(
@@ -4187,8 +3923,7 @@ class Router:
 
         passthrough_on_no_deployment = kwargs.pop("passthrough_on_no_deployment", False)
         function_name = "_ageneric_api_call_with_fallbacks"
-        auth_selection: Optional[_AuthSelectionCtx] = None
-        marked_failure_for_raised_exception = False
+        auth_handler: Optional[AuthRotationHandler] = None
         try:
             parent_otel_span = _get_parent_otel_span_from_kwargs(kwargs)
             try:
@@ -4220,35 +3955,14 @@ class Router:
                 kwargs=kwargs, model=model, model_name=model_name
             )
 
-            auth_records = kwargs.get("auth_records")
-            all_auth_records: Optional[List[Any]]
-            if auth_records is None:
-                all_auth_records = None
-            elif isinstance(auth_records, list):
-                all_auth_records = auth_records
-            else:
-                try:
-                    all_auth_records = list(auth_records)
-                    kwargs["auth_records"] = all_auth_records
-                except Exception:
-                    all_auth_records = None
-
-            attempted_auth_ids: set[str] = set()
-            refreshed_auth_ids: set[str] = set()
-            max_auth_attempts = (
-                len(all_auth_records)
-                if (self.auth_selector is not None and all_auth_records)
-                else 0
+            auth_handler = AuthRotationHandler(
+                router=self,
+                model=model,
+                deployment=deployment,
+                kwargs=kwargs,
+                requires_subscription=requires_subscription,
+                model_name=model_name,
             )
-
-            def _replace_auth_record(updated: Any) -> None:
-                if not all_auth_records:
-                    return
-                updated_id = getattr(updated, "id", None)
-                for idx, rec in enumerate(all_auth_records):
-                    if getattr(rec, "id", None) == updated_id:
-                        all_auth_records[idx] = updated
-                        return
 
             async def _do_call() -> Any:
                 sanitized_kwargs = {
@@ -4265,140 +3979,14 @@ class Router:
                 )
                 if (
                     self.auth_streaming_prefetch_first_chunk
-                    and auth_selection is not None
-                    and max_auth_attempts > 0
+                    and auth_handler is not None
+                    and auth_handler.auth_selection is not None
+                    and auth_handler.max_auth_attempts > 0
                     and hasattr(resp, "__anext__")
                 ):
                     first_chunk = await resp.__anext__()  # type: ignore[attr-defined]
                     return _PrefetchedStreamWrapper(first_chunk, resp)
                 return resp
-
-            async def _call_with_auth_rotation() -> Any:
-                nonlocal auth_selection, marked_failure_for_raised_exception
-                while True:
-                    if attempted_auth_ids and all_auth_records is not None:
-                        kwargs["auth_records"] = [
-                            rec
-                            for rec in all_auth_records
-                            if getattr(rec, "id", None) not in attempted_auth_ids
-                        ]
-
-                    auth_selection = self._maybe_select_auth(
-                        model=model, deployment=deployment, kwargs=kwargs
-                    )
-
-                    if auth_selection is None:
-                        if requires_subscription:
-                            raise litellm.RateLimitError(
-                                message=f"no healthy subscription credentials available for {model}",
-                                llm_provider=_model_provider(model_name) or "",
-                                model=model_name,
-                            )
-                        strategy = None
-                    else:
-                        self._log_auth_identity(auth_selection)
-                        strategy = self._auth_strategy_for(
-                            auth_selection.selection.auth.provider
-                        )
-                        try:
-                            auth_selection = self._prepare_auth_headers(
-                                auth_ctx=auth_selection,
-                                strategy=strategy,
-                                model=model,
-                                kwargs=kwargs,
-                            )
-                        except Exception as header_error:
-                            if auth_selection is not None and max_auth_attempts > 0:
-                                updated = self._mark_auth_failure(
-                                    auth_selection, header_error
-                                )
-                                if updated is not None:
-                                    _replace_auth_record(updated)
-                                attempted_auth_ids.add(auth_selection.selection.auth.id)
-                                if len(attempted_auth_ids) >= max_auth_attempts:
-                                    marked_failure_for_raised_exception = True
-                                    raise
-                                continue
-                            raise
-
-                        try:
-                            self._check_subscription_ratelimit(auth_selection)
-                        except Exception as e:
-                            status_code = interpret_status_code(e)
-                            if (
-                                status_code == 429
-                                and auth_selection is not None
-                                and max_auth_attempts > 0
-                            ):
-                                updated = self._mark_auth_failure(auth_selection, e)
-                                if updated is not None:
-                                    _replace_auth_record(updated)
-                                attempted_auth_ids.add(auth_selection.selection.auth.id)
-                                if len(attempted_auth_ids) >= max_auth_attempts:
-                                    marked_failure_for_raised_exception = True
-                                    raise
-                                continue
-                            raise
-
-                    try:
-                        response = await _do_call()
-                    except Exception as e:
-                        status_code = interpret_status_code(e)
-                        if (
-                            strategy is not None
-                            and getattr(strategy, "supports_refresh", True)
-                            and auth_selection is not None
-                            and status_code in (401, 403)
-                            and auth_selection.selection.auth.id not in refreshed_auth_ids
-                        ):
-                            refreshed_auth_ids.add(auth_selection.selection.auth.id)
-                            try:
-                                auth_selection = self._maybe_refresh_auth(
-                                    auth_selection,
-                                    strategy,
-                                    RequestContext(
-                                        model=model,
-                                        user_id=kwargs.get("user"),
-                                        team_id=kwargs.get("team"),
-                                        metadata=kwargs.get("metadata", {}),
-                                    ),
-                                )
-                                auth_selection = self._prepare_auth_headers(
-                                    auth_ctx=auth_selection,
-                                    strategy=strategy,
-                                    model=model,
-                                    kwargs=kwargs,
-                                )
-                            except Exception as refresh_exc:
-                                e = refresh_exc
-                                status_code = status_code or interpret_status_code(
-                                    refresh_exc
-                                )
-                            else:
-                                try:
-                                    response = await _do_call()
-                                except Exception as refresh_error:
-                                    e = refresh_error
-                                    status_code = interpret_status_code(refresh_error)
-                                else:
-                                    return response
-
-                        if (
-                            strategy is not None
-                            and auth_selection is not None
-                            and self._should_rotate_on_auth_error(e, status_code)
-                            and max_auth_attempts > 0
-                        ):
-                            updated = self._mark_auth_failure(auth_selection, e)
-                            if updated is not None:
-                                _replace_auth_record(updated)
-                            attempted_auth_ids.add(auth_selection.selection.auth.id)
-                            if len(attempted_auth_ids) >= max_auth_attempts:
-                                marked_failure_for_raised_exception = True
-                                raise
-                            continue
-                        raise
-                    return response
 
             rpm_semaphore = self._get_client(
                 deployment=deployment,
@@ -4413,30 +4001,37 @@ class Router:
                     await self.async_routing_strategy_pre_call_checks(
                         deployment=deployment, parent_otel_span=parent_otel_span
                     )
-                    response = await _call_with_auth_rotation()
+                    response = await auth_handler.run_async(_do_call)
             else:
                 await self.async_routing_strategy_pre_call_checks(
                     deployment=deployment, parent_otel_span=parent_otel_span
                 )
-                response = await _call_with_auth_rotation()
+                response = await auth_handler.run_async(_do_call)
 
             self.success_calls[model_name] += 1
             verbose_router_logger.info(
                 f"ageneric_api_call_with_fallbacks(model={model_name})\033[32m 200 OK\033[0m"
             )
-            if auth_selection is not None:
-                self.auth_metrics.record_call(auth_selection.selection.auth.provider)
-                self._mark_auth_success(auth_selection)
+            if auth_handler is not None and auth_handler.auth_selection is not None:
+                self.auth_metrics.record_call(
+                    auth_handler.auth_selection.selection.auth.provider
+                )
+                self._mark_auth_success(auth_handler.auth_selection)
 
             return response
         except Exception as e:
             verbose_router_logger.info(
                 f"ageneric_api_call_with_fallbacks(model={model})\033[31m Exception {str(e)}\033[0m"
             )
-            if (
-                auth_selection is not None
-                and not marked_failure_for_raised_exception
-            ):
+            auth_selection = (
+                auth_handler.auth_selection if auth_handler is not None else None
+            )
+            marked_failure_for_raised_exception = (
+                auth_handler.marked_failure_for_raised_exception
+                if auth_handler is not None
+                else False
+            )
+            if auth_selection is not None and not marked_failure_for_raised_exception:
                 self._mark_auth_failure(auth_selection, e)
             if model is not None:
                 self.fail_calls[model] += 1
