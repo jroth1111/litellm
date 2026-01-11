@@ -13,6 +13,13 @@ from base_ocr_unit_tests import BaseOCRTest
 
 def load_vertex_ai_credentials():
     """Load Vertex AI credentials for tests"""
+    pytest.importorskip("google.auth")
+    if not os.environ.get("VERTEX_AI_PRIVATE_KEY") or not os.environ.get(
+        "VERTEX_AI_PRIVATE_KEY_ID"
+    ):
+        pytest.skip(
+            "VERTEX_AI_PRIVATE_KEY and VERTEX_AI_PRIVATE_KEY_ID env vars required"
+        )
     # Define the path to the vertex_key.json file
     print("loading vertex ai credentials")
     filepath = os.path.dirname(os.path.abspath(__file__))
@@ -125,4 +132,3 @@ def test_vertex_ai_ocr_routing():
     deepseek_variant = get_vertex_ai_ocr_config("vertex_ai/deepseek-ocr-maas")
     assert isinstance(deepseek_variant, VertexAIDeepSeekOCRConfig), \
         "DeepSeek variant should route to VertexAIDeepSeekOCRConfig"
-

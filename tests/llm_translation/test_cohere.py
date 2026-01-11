@@ -21,6 +21,10 @@ from unittest.mock import AsyncMock, patch
 from litellm import RateLimitError, Timeout, completion, completion_cost, embedding
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 
+COHERE_API_KEY = os.getenv("COHERE_API_KEY")
+if not COHERE_API_KEY:
+    pytest.skip("COHERE_API_KEY not set", allow_module_level=True)
+
 litellm.num_retries = 3
 
 

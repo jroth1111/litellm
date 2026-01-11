@@ -17,6 +17,11 @@ from litellm import completion
 import json
 
 
+def _skip_if_missing_gemini_api_key() -> None:
+    if not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
+        pytest.skip("GEMINI_API_KEY/GOOGLE_API_KEY not set")
+
+
 class TestGoogleAIStudioGemini(BaseLLMChatTest):
     def get_base_completion_call_args(self) -> dict:
         return {"model": "gemini/gemini-2.5-flash"}
@@ -270,6 +275,7 @@ def test_gemini_context_caching_separate_messages():
 
 def test_gemini_image_generation():
     # litellm._turn_on_debug()
+    _skip_if_missing_gemini_api_key()
     response = completion(
         model="gemini/gemini-2.0-flash-exp-image-generation",
         messages=[{"role": "user", "content": "Generate an image of a cat"}],
@@ -413,6 +419,7 @@ def test_gemini_imagen_models_use_predict_endpoint():
 
 def test_gemini_thinking():
     litellm._turn_on_debug()
+    _skip_if_missing_gemini_api_key()
     from litellm.types.utils import Message, CallTypes
     from litellm.utils import return_raw_request
     import json
@@ -475,10 +482,8 @@ def test_gemini_thinking_budget_0():
 
 
 def test_gemini_finish_reason():
-    import os
-    from litellm import completion
-
     litellm._turn_on_debug()
+    _skip_if_missing_gemini_api_key()
     response = completion(
         model="gemini/gemini-2.5-flash-lite",
         messages=[{"role": "user", "content": "give me 3 random words"}],
@@ -493,6 +498,7 @@ def test_gemini_url_context():
     from litellm import completion
 
     litellm._turn_on_debug()
+    _skip_if_missing_gemini_api_key()
     URL1 = "https://www.foodnetwork.com/recipes/ina-garten/perfect-roast-chicken-recipe-1940592"
 
     prompt = f"""
@@ -519,6 +525,7 @@ def test_gemini_with_grounding():
     from litellm import completion, Usage, stream_chunk_builder
 
     litellm._turn_on_debug()
+    _skip_if_missing_gemini_api_key()
     litellm.set_verbose = True
     tools = [{"googleSearch": {}}]
 
@@ -555,6 +562,7 @@ def test_gemini_with_empty_function_call_arguments():
     from litellm import completion
 
     litellm._turn_on_debug()
+    _skip_if_missing_gemini_api_key()
     tools = [
         {
             "type": "function",
@@ -575,6 +583,7 @@ def test_gemini_with_empty_function_call_arguments():
 
 @pytest.mark.asyncio
 async def test_claude_tool_use_with_gemini():
+    _skip_if_missing_gemini_api_key()
     response = await litellm.anthropic.messages.acreate(
         messages=[
             {
@@ -675,6 +684,7 @@ async def test_claude_tool_use_with_gemini():
 
 
 def test_gemini_tool_use():
+    _skip_if_missing_gemini_api_key()
     data = {
         "max_tokens": 8192,
         "stream": True,
@@ -726,6 +736,7 @@ def test_gemini_tool_use():
 @pytest.mark.asyncio
 async def test_gemini_image_generation_async():
     litellm._turn_on_debug()
+    _skip_if_missing_gemini_api_key()
     response = await litellm.acompletion(
         messages=[
             {
@@ -755,6 +766,7 @@ async def test_gemini_image_generation_async():
 @pytest.mark.asyncio
 async def test_gemini_image_generation_async_stream():
     # litellm._turn_on_debug()
+    _skip_if_missing_gemini_api_key()
     response = await litellm.acompletion(
         messages=[
             {
@@ -791,6 +803,7 @@ def test_system_message_with_no_user_message():
     """
     Test that the system message is translated correctly for non-OpenAI providers.
     """
+    _skip_if_missing_gemini_api_key()
     messages = [
         {
             "role": "system",
@@ -825,6 +838,7 @@ def test_gemini_with_thinking():
     from litellm import completion
 
     litellm._turn_on_debug()
+    _skip_if_missing_gemini_api_key()
     litellm.modify_params = True
     model = "gemini/gemini-2.5-flash"
     messages = [
@@ -1135,6 +1149,7 @@ def l(status_code, expected_exception):
 
 def test_gemini_embedding():
     litellm._turn_on_debug()
+    _skip_if_missing_gemini_api_key()
     response = litellm.embedding(
         model="gemini/gemini-embedding-001",
         input="Hello, world!",

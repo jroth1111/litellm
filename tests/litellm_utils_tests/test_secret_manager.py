@@ -69,6 +69,14 @@ def load_vertex_ai_credentials():
 
 def test_aws_secret_manager():
     import json
+    pytest.importorskip("botocore")
+    if not (
+        os.getenv("AWS_PROFILE")
+        or (os.getenv("AWS_ACCESS_KEY_ID") and os.getenv("AWS_SECRET_ACCESS_KEY"))
+    ):
+        pytest.skip("AWS credentials not set")
+    if not (os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")):
+        pytest.skip("AWS region not set")
 
     AWSSecretsManagerV2.load_aws_secret_manager(use_aws_secret_manager=True)
 
@@ -248,6 +256,8 @@ def test_google_secret_manager():
     """
     Test that we can get a secret from Google Secret Manager
     """
+    pytest.importorskip("apscheduler")
+    pytest.importorskip("google.cloud.secretmanager")
     os.environ["GOOGLE_SECRET_MANAGER_PROJECT_ID"] = "pathrise-convert-1606954137718"
 
     from litellm.secret_managers.google_secret_manager import GoogleSecretManager
@@ -271,6 +281,8 @@ def test_google_secret_manager_read_in_memory():
     """
     Test that Google Secret manager returs in memory value when it exists
     """
+    pytest.importorskip("apscheduler")
+    pytest.importorskip("google.cloud.secretmanager")
     from litellm.secret_managers.google_secret_manager import GoogleSecretManager
 
     load_vertex_ai_credentials()

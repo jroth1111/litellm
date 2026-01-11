@@ -30,6 +30,7 @@ class AuthMetrics:
         self.calls_by_provider: DefaultDict[str, int] = defaultdict(int)
         self.quota_hits_by_provider: DefaultDict[str, int] = defaultdict(int)
         self.auth_errors_by_provider: DefaultDict[str, int] = defaultdict(int)
+        self.failovers_by_provider: DefaultDict[str, int] = defaultdict(int)
         self.sink = sink  # optional hook to emit custom metrics
 
     def record_call(self, provider: str) -> None:
@@ -46,6 +47,11 @@ class AuthMetrics:
         self.auth_errors_by_provider[provider] += 1
         if self.sink:
             self.sink("auth_errors_total", provider=provider)
+
+    def record_failover(self, provider: str) -> None:
+        self.failovers_by_provider[provider] += 1
+        if self.sink:
+            self.sink("auth_failovers_total", provider=provider)
 
 
 class PrometheusAuthMetrics(AuthMetrics):
@@ -66,6 +72,7 @@ class PrometheusAuthMetrics(AuthMetrics):
         self._calls_counter: Optional["Counter"] = None
         self._quota_counter: Optional["Counter"] = None
         self._errors_counter: Optional["Counter"] = None
+        self._failovers_counter: Optional["Counter"] = None
 
         try:
             from prometheus_client import Counter
@@ -85,6 +92,11 @@ class PrometheusAuthMetrics(AuthMetrics):
                 "Auth errors by provider",
                 ["provider"],
             )
+            self._failovers_counter = Counter(
+                "litellm_auth_failovers_total",
+                "Auth failover events by provider",
+                ["provider"],
+            )
         except ImportError:
             pass  # prometheus_client not installed; use in-memory only
 
@@ -102,6 +114,11 @@ class PrometheusAuthMetrics(AuthMetrics):
         super().record_auth_error(provider)
         if self._errors_counter is not None:
             self._errors_counter.labels(provider=provider).inc()
+
+    def record_failover(self, provider: str) -> None:
+        super().record_failover(provider)
+        if self._failovers_counter is not None:
+            self._failovers_counter.labels(provider=provider).inc()
 
 
 class AuthHooks:
@@ -163,4 +180,3 @@ class NoopAuthHooks(AuthHooks):
         status_code: Optional[int] = None,
     ) -> None:  # pragma: no cover
         return
-

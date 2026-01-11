@@ -21,6 +21,7 @@ from litellm.types.utils import StandardLoggingPayload
 sys.path.insert(
     0, os.path.abspath("../..")
 )  # Adds the parent directory to the system path
+pytest.importorskip("a2a")
 from a2a.types import MessageSendParams, SendMessageRequest
 @pytest.mark.asyncio
 async def test_asend_message_with_client_decorator():

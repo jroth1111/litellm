@@ -32,6 +32,25 @@ import pytest
 import litellm
 from litellm import completion
 
+AZURE_API_KEY = (
+    os.getenv("AZURE_API_KEY")
+    or os.getenv("AZURE_OPENAI_API_KEY")
+    or os.getenv("AZURE_AI_API_KEY")
+)
+AZURE_AD_TOKEN = os.getenv("AZURE_OPENAI_AD_TOKEN") or os.getenv("AZURE_AD_TOKEN")
+AZURE_API_BASE = (
+    os.getenv("AZURE_API_BASE")
+    or os.getenv("AZURE_OPENAI_ENDPOINT")
+    or os.getenv("AZURE_AI_API_BASE")
+)
+
+
+def _skip_if_missing_azure_credentials(require_base: bool = False) -> None:
+    if not (AZURE_API_KEY or AZURE_AD_TOKEN):
+        pytest.skip("Azure credentials not set")
+    if require_base and not AZURE_API_BASE:
+        pytest.skip("Azure API base not set")
+
 
 @pytest.mark.parametrize(
     "model_group_header, expected_model",
@@ -280,6 +299,8 @@ async def test_azure_ai_request_format():
 
     litellm._turn_on_debug()
 
+    _skip_if_missing_azure_credentials(require_base=True)
+
     # Set up the test parameters
     api_key = os.getenv("AZURE_API_KEY")
     api_base = os.getenv("AZURE_API_BASE")
@@ -303,6 +324,7 @@ async def test_azure_ai_request_format():
 @pytest.mark.parametrize("model", ["azure/gpt5_series/gpt-5-mini", "azure/gpt-5-mini"])
 async def test_azure_gpt5_reasoning(model):
     litellm._turn_on_debug()
+    _skip_if_missing_azure_credentials(require_base=True)
     response = await litellm.acompletion(
         model=model,
         messages=[{"role": "user", "content": "What is the capital of France?"}],
@@ -320,6 +342,7 @@ def test_completion_azure():
     try:
         from litellm import completion_cost
         litellm.set_verbose = False
+        _skip_if_missing_azure_credentials(require_base=True)
         ## Test azure call
         response = completion(
             model="azure/gpt-4.1-mini",
@@ -352,6 +375,7 @@ def test_completion_azure():
 def test_completion_azure_ai_gpt_4o_with_flexible_api_base(api_base):
     try:
         litellm.set_verbose = True
+        _skip_if_missing_azure_credentials()
 
         response = completion(
             model="azure_ai/gpt-4.1-mini",

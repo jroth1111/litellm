@@ -3,6 +3,7 @@ import os
 import json
 import pytest
 from unittest.mock import patch
+pytest.importorskip("botocore")
 from botocore.credentials import Credentials
 import sys
 

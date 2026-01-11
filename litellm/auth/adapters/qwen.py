@@ -18,7 +18,7 @@ class QwenSubscriptionAdapter(BaseSubscriptionAdapter):
     capabilities = AdapterCapabilities(
         login_flow="device_code",
         supports_refresh=True,
-        supports_models_list=False,
+        supports_models_list=True,
     )
 
     @staticmethod
@@ -48,8 +48,12 @@ class QwenSubscriptionAdapter(BaseSubscriptionAdapter):
         lowered = (model or "").lower()
         if lowered.startswith("qwen/"):
             return True
+        if lowered.startswith("dashscope/qwen"):
+            return True
         # Direct qwen model names without other provider prefix
         if "/" not in lowered and lowered.startswith("qwen"):
+            return True
+        if "/" not in lowered and "qwen" in lowered:
             return True
         return False
 

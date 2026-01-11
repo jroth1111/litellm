@@ -4,24 +4,27 @@ import logging
 from datetime import timedelta
 from typing import Any, Dict, Optional
 
-from ..core import AuthRecord, RequestContext
+from ..core import AuthKind, AuthRecord, RequestContext
 from .base import AdapterCapabilities, BaseSubscriptionAdapter
 from .llms_oauth_loader import load_module
 from .utils import token_dataclass_to_metadata
 
 _logger = logging.getLogger(__name__)
 
+# Google API client identifier for Gemini requests
+GEMINI_API_CLIENT = "genai-py/0.5.0"
+
 
 class GeminiSubscriptionAdapter(BaseSubscriptionAdapter):
     """Gemini subscription OAuth adapter."""
-    
+
     provider = "gemini"
     supports_refresh = True
     refresh_lead_default = timedelta(minutes=5)
     capabilities = AdapterCapabilities(
         login_flow="browser_pkce",
         supports_refresh=True,
-        supports_models_list=False,
+        supports_models_list=True,
     )
 
     @staticmethod
@@ -34,6 +37,44 @@ class GeminiSubscriptionAdapter(BaseSubscriptionAdapter):
     @property
     def default_redirect_uri(self) -> str:
         return str(self._oauth().GEMINI_DEFAULT_REDIRECT_URI)
+
+    def prepare(
+        self, headers: Dict[str, str], ctx: RequestContext, auth: AuthRecord
+    ) -> Dict[str, str]:
+        """
+        Add Gemini-specific headers.
+
+        Google Gemini API requires:
+        - Authorization: Bearer <token>
+        - x-goog-api-client: Client identifier for tracking
+        - x-goog-user-project: Project ID for billing (if applicable)
+        """
+        token = auth.resolve_secret()
+        if not token:
+            raise ValueError(f"missing auth token for {self.provider}")
+
+        new_headers = dict(headers)
+        if auth.kind in (AuthKind.API, AuthKind.WELLKNOWN):
+            new_headers["x-goog-api-key"] = str(token)
+        else:
+            new_headers["Authorization"] = f"Bearer {token}"
+
+        # Add Google API client identifier
+        if "x-goog-api-client" not in new_headers:
+            api_client = auth.attributes.get("api_client", GEMINI_API_CLIENT)
+            new_headers["x-goog-api-client"] = api_client
+
+        # Add project ID for quota/billing if available
+        project_id = auth.metadata.get("project_id") or auth.attributes.get("project_id")
+        if project_id and "x-goog-user-project" not in new_headers:
+            new_headers["x-goog-user-project"] = project_id
+
+        # Add quota user if available (for per-user rate limiting)
+        quota_user = auth.metadata.get("email") or auth.attributes.get("quota_user")
+        if quota_user and "x-goog-quota-user" not in new_headers:
+            new_headers["x-goog-quota-user"] = quota_user
+
+        return new_headers
 
     def authorize_url(
         self, *, state: str, code_challenge: str, redirect_uri: str
@@ -72,11 +113,13 @@ class GeminiSubscriptionAdapter(BaseSubscriptionAdapter):
 
     def supports(self, model: str) -> bool:
         """Check if this adapter supports the given model.
-        
+
         Matches models starting with 'gemini/' or 'gemini'.
         """
         lowered = (model or "").lower()
         if lowered.startswith("gemini/"):
+            return True
+        if lowered.startswith("google/gemini"):
             return True
         # Direct gemini model names without other provider prefix
         if "/" not in lowered and lowered.startswith("gemini"):

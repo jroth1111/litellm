@@ -51,6 +51,8 @@ class TestAnthropicResponsesAPITest(BaseResponsesAPITest):
 
 
 def test_multiturn_tool_calls():
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        pytest.skip("ANTHROPIC_API_KEY not set")
     # Test streaming response with tools for Anthropic
     litellm._turn_on_debug()
     shell_tool = dict(FunctionTool(

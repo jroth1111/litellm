@@ -1,6 +1,7 @@
 import os
 import sys
 import traceback
+import importlib.util
 from dotenv import load_dotenv
 import litellm.types
 import pytest
@@ -13,6 +14,8 @@ import os
 
 sys.path.insert(0, os.path.abspath("../.."))
 from unittest.mock import AsyncMock, Mock, patch
+
+BOTOCORE_AVAILABLE = importlib.util.find_spec("botocore") is not None
 
 
 # Initialize the transformer
@@ -71,6 +74,7 @@ def test_transform_request_invalid_provider(bedrock_transformer):
     assert "Unknown provider" in str(exc_info.value)
 
 
+@pytest.mark.skipif(not BOTOCORE_AVAILABLE, reason="botocore is required")
 @patch("botocore.auth.SigV4Auth")
 @patch("botocore.awsrequest.AWSRequest")
 def test_sign_request_basic(mock_aws_request, mock_sigv4_auth, bedrock_transformer):

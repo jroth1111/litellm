@@ -133,7 +133,10 @@ from ..integrations.azure_storage.azure_storage import AzureBlobStorageLogger
 from ..integrations.custom_prompt_management import CustomPromptManagement
 from ..integrations.datadog.datadog import DataDogLogger
 from ..integrations.datadog.datadog_llm_obs import DataDogLLMObsLogger
-from ..integrations.dotprompt import DotpromptManager
+try:
+    from ..integrations.dotprompt import DotpromptManager
+except Exception:  # pragma: no cover - optional dependency
+    DotpromptManager = None
 from ..integrations.dynamodb import DyanmoDBLogger
 from ..integrations.galileo import GalileoObserve
 from ..integrations.gcs_bucket.gcs_bucket import GCSBucketLogger
@@ -3968,6 +3971,10 @@ def _init_custom_logger_compatible_class(  # noqa: PLR0915
             _in_memory_loggers.append(humanloop_logger)
             return humanloop_logger  # type: ignore
         elif logging_integration == "dotprompt":
+            if DotpromptManager is None:
+                raise ImportError(
+                    "dotprompt integration requires the optional jinja2 dependency"
+                )
             for callback in _in_memory_loggers:
                 if isinstance(callback, DotpromptManager):
                     return callback

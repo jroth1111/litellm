@@ -6,29 +6,33 @@ All exceptions can be imported from `litellm` - e.g. `from litellm import BadReq
 
 ## LiteLLM Exceptions
 
+<!-- exception-key-map: | _ | BadRequestError | _ | _ | UnsupportedParamsError | _ | _ | ContextWindowExceededError | _ | _ | RejectedRequestError | _ | _ | ContentPolicyViolationError | _ | _ | AuthenticationError | _ | _ | PermissionDeniedError | _ | _ | NotFoundError | _ | _ | Timeout | _ | _ | UnprocessableEntityError | _ | _ | RateLimitError | _ | _ | APIConnectionError | _ | _ | APIError | _ | _ | BadGatewayError | _ | _ | ServiceUnavailableError | _ | _ | InternalServerError | _ | _ | APIResponseValidationError | _ | _ | JSONSchemaValidationError | _ | _ | OpenAIError | _ -->
+
 | Status Code | Error Type               | Inherits from | Description |
 |-------------|--------------------------|---------------|-------------|
-| 400         | BadRequestError          | openai.BadRequestError |
-| 400 | UnsupportedParamsError | litellm.BadRequestError | Raised when unsupported params are passed |
-| 400         | ContextWindowExceededError| litellm.BadRequestError | Special error type for context window exceeded error messages - enables context window fallbacks |
-| 400         | ContentPolicyViolationError| litellm.BadRequestError | Special error type for content policy violation error messages - enables content policy fallbacks |
-| 400         | ImageFetchError | litellm.BadRequestError | Raised when there are errors fetching or processing images |
-| 400 | InvalidRequestError | openai.BadRequestError | Deprecated error, use BadRequestError instead |
-| 401         | AuthenticationError      | openai.AuthenticationError |
-| 403         | PermissionDeniedError    | openai.PermissionDeniedError |
-| 404         | NotFoundError            | openai.NotFoundError | raise when invalid models passed, example gpt-8 |
-| 408 | Timeout | openai.APITimeoutError | Raised when a timeout occurs |
-| 422         | UnprocessableEntityError | openai.UnprocessableEntityError |
-| 429         | RateLimitError           | openai.RateLimitError |
+| 400         | BadRequestError          | openai.BadRequestError | Generic bad request error |
+| 400         | UnsupportedParamsError   | litellm.BadRequestError | Raised when unsupported params are passed |
+| 400         | ContextWindowExceededError | litellm.BadRequestError | Special error type for context window exceeded error messages - enables context window fallbacks |
+| 400         | ContentPolicyViolationError | litellm.BadRequestError | Special error type for content policy violation error messages - enables content policy fallbacks |
+| 400         | RejectedRequestError     | litellm.BadRequestError | Guardrail or policy rejection in proxy |
+| 400         | ImageFetchError          | litellm.BadRequestError | Raised when there are errors fetching or processing images |
+| 400         | InvalidRequestError      | openai.BadRequestError | Deprecated error, use BadRequestError instead |
+| 401         | AuthenticationError      | openai.AuthenticationError | Authentication failed |
+| 403         | PermissionDeniedError    | openai.PermissionDeniedError | Permission denied or insufficient scope |
+| 404         | NotFoundError            | openai.NotFoundError | Raised when invalid models are passed, example gpt-8 |
+| 408         | Timeout                  | openai.APITimeoutError | Raised when a timeout occurs |
+| 422         | UnprocessableEntityError | openai.UnprocessableEntityError | Request validation failed |
+| 429         | RateLimitError           | openai.RateLimitError | Rate limit exceeded |
 | 500         | APIConnectionError       | openai.APIConnectionError | If any unmapped error is returned, we return this error |
-| 500         | APIError | openai.APIError | Generic 500-status code error | 
-| 503 | ServiceUnavailableError | openai.APIStatusError | If provider returns a service unavailable error, this error is raised |
+| 500         | APIError                 | openai.APIError | Generic 500-status code error |
+| 502         | BadGatewayError          | openai.APIStatusError | Upstream returned a bad gateway response |
+| 503         | ServiceUnavailableError  | openai.APIStatusError | If provider returns a service unavailable error, this error is raised |
 | >=500       | InternalServerError      | openai.InternalServerError | If any unmapped 500-status code error is returned, this error is raised |
 | N/A         | APIResponseValidationError | openai.APIResponseValidationError | If Rules are used, and request/response fails a rule, this error is raised |
-| N/A | BudgetExceededError | Exception | Raised for proxy, when budget is exceeded |
-| N/A | JSONSchemaValidationError | litellm.APIResponseValidationError | Raised when response does not match expected json schema - used if `response_schema` param passed in with `enforce_validation=True` |
-| N/A | MockException | Exception | Internal exception, raised by mock_completion class. Do not use directly | 
-| N/A | OpenAIError | openai.OpenAIError | Deprecated internal exception, inherits from openai.OpenAIError. |
+| N/A         | BudgetExceededError      | Exception | Raised for proxy, when budget is exceeded |
+| N/A         | JSONSchemaValidationError | litellm.APIResponseValidationError | Raised when response does not match expected json schema - used if `response_schema` param passed in with `enforce_validation=True` |
+| N/A         | MockException            | Exception | Internal exception, raised by mock_completion class. Do not use directly |
+| N/A         | OpenAIError              | openai.OpenAIError | Deprecated internal exception, inherits from openai.OpenAIError |
 
 
 

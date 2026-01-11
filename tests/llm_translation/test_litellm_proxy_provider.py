@@ -12,6 +12,7 @@ sys.path.insert(
 import litellm
 from litellm import completion, embedding
 import pytest
+pytest.importorskip("pytest_asyncio")
 from unittest.mock import MagicMock, patch
 from litellm.llms.custom_httpx.http_handler import HTTPHandler, AsyncHTTPHandler
 import pytest_asyncio

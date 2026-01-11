@@ -2,6 +2,7 @@ import pytest
 import os
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
+pytest.importorskip("botocore")
 from botocore.credentials import Credentials
 from typing import Dict, Any
 from litellm.llms.bedrock.base_aws_llm import (

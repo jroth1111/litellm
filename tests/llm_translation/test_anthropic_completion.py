@@ -360,6 +360,8 @@ def test_process_anthropic_headers_with_no_matching_headers():
 )
 def test_anthropic_tool_use(tool_type, tool_config, message_content):
     """Test Anthropic tool use with computer use and web fetch tools."""
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        pytest.skip("ANTHROPIC_API_KEY not set")
     from litellm import completion
 
     litellm._turn_on_debug()
@@ -483,6 +485,10 @@ def test_create_json_tool_call_for_response_format():
 from litellm import completion
 
 
+@pytest.mark.skipif(
+    os.getenv("ANTHROPIC_API_KEY") is None,
+    reason="requires ANTHROPIC_API_KEY",
+)
 class TestAnthropicCompletion(BaseLLMChatTest, BaseAnthropicChatTest):
     def get_base_completion_call_args(self) -> dict:
         return {"model": "anthropic/claude-sonnet-4-5-20250929"}
@@ -947,6 +953,10 @@ async def test_anthropic_structured_output():
     print(response)
 
 
+@pytest.mark.skipif(
+    os.getenv("ANTHROPIC_API_KEY") is None,
+    reason="requires ANTHROPIC_API_KEY",
+)
 def test_anthropic_citations_api():
     """
     Test the citations API
@@ -996,6 +1006,10 @@ def test_anthropic_citations_api():
         assert "end_char_index" in citation
 
 
+@pytest.mark.skipif(
+    os.getenv("ANTHROPIC_API_KEY") is None,
+    reason="requires ANTHROPIC_API_KEY",
+)
 def test_anthropic_citations_api_streaming():
     from litellm import completion
 
@@ -1046,6 +1060,14 @@ def test_anthropic_citations_api_streaming():
 def test_anthropic_thinking_output(model):
     from litellm import completion
 
+    if model.startswith("anthropic") and os.getenv("ANTHROPIC_API_KEY") is None:
+        pytest.skip("requires ANTHROPIC_API_KEY")
+    if model.startswith("bedrock"):
+        try:
+            import botocore  # noqa: F401
+        except ImportError:
+            pytest.skip("requires botocore")
+
     litellm._turn_on_debug()
 
     resp = completion(
@@ -1075,6 +1097,8 @@ def test_anthropic_thinking_output(model):
 )
 def test_anthropic_thinking_output_stream(model):
     litellm.set_verbose = True
+    if model.startswith("anthropic") and os.getenv("ANTHROPIC_API_KEY") is None:
+        pytest.skip("requires ANTHROPIC_API_KEY")
     try:
         # litellm._turn_on_debug()
         resp = litellm.completion(
@@ -1110,11 +1134,12 @@ def test_anthropic_thinking_output_stream(model):
         pytest.skip("Model is timing out")
 
 
-def test_anthropic_custom_headers():
+def test_anthropic_custom_headers(monkeypatch):
     from litellm import completion
     from litellm.llms.custom_httpx.http_handler import HTTPHandler
 
     client = HTTPHandler()
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 
     tools = [
         {
@@ -1157,6 +1182,8 @@ def test_anthropic_custom_headers():
     ],
 )
 def test_anthropic_thinking_in_assistant_message(model):
+    if os.getenv("ANTHROPIC_API_KEY") is None:
+        pytest.skip("requires ANTHROPIC_API_KEY")
     litellm._turn_on_debug()
     params = {
         "model": model,
@@ -1194,6 +1221,8 @@ def test_anthropic_thinking_in_assistant_message(model):
     ],
 )
 def test_anthropic_redacted_thinking_in_assistant_message(model):
+    if os.getenv("ANTHROPIC_API_KEY") is None:
+        pytest.skip("requires ANTHROPIC_API_KEY")
     litellm._turn_on_debug()
     params = {
         "model": model,
@@ -1225,6 +1254,8 @@ def test_anthropic_redacted_thinking_in_assistant_message(model):
 def test_just_system_message():
     litellm._turn_on_debug()
     litellm.modify_params = True
+    if os.getenv("ANTHROPIC_API_KEY") is None:
+        pytest.skip("requires ANTHROPIC_API_KEY")
     params = {
         "model": "anthropic/claude-3-7-sonnet-20250219",
         "messages": [{"role": "system", "content": "You are a helpful assistant."}],
@@ -1301,6 +1332,8 @@ async def test_anthropic_api_max_completion_tokens(model: str):
     ],
 )
 def test_anthropic_websearch(optional_params: dict):
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        pytest.skip("ANTHROPIC_API_KEY not set")
     litellm._turn_on_debug()
     params = {
         "model": "anthropic/claude-sonnet-4-5-20250929",
@@ -1327,6 +1360,8 @@ def test_anthropic_websearch(optional_params: dict):
 
 
 def test_anthropic_text_editor():
+    if os.getenv("ANTHROPIC_API_KEY") is None:
+        pytest.skip("requires ANTHROPIC_API_KEY")
     litellm._turn_on_debug()
     params = {
         "model": "anthropic/claude-sonnet-4-5-20250929",
@@ -1351,6 +1386,11 @@ def test_anthropic_text_editor():
 
 @pytest.mark.parametrize("spec", ["anthropic", "openai"])
 def test_anthropic_mcp_server_tool_use(spec: str):
+    if not os.getenv("ZAPIER_CI_CD_MCP_TOKEN"):
+        pytest.skip("requires ZAPIER_CI_CD_MCP_TOKEN")
+    if os.getenv("ANTHROPIC_API_KEY") is None:
+        pytest.skip("requires ANTHROPIC_API_KEY")
+
     litellm._turn_on_debug()
 
     if spec == "anthropic":
@@ -1394,6 +1434,13 @@ def test_anthropic_mcp_server_tool_use(spec: str):
 def test_anthropic_mcp_server_responses_api(model: str):
     from litellm import responses
 
+    if not os.getenv("ZAPIER_CI_CD_MCP_TOKEN"):
+        pytest.skip("requires ZAPIER_CI_CD_MCP_TOKEN")
+    if model.startswith("anthropic") and os.getenv("ANTHROPIC_API_KEY") is None:
+        pytest.skip("requires ANTHROPIC_API_KEY")
+    if model.startswith("openai") and os.getenv("OPENAI_API_KEY") is None:
+        pytest.skip("requires OPENAI_API_KEY")
+
     litellm._turn_on_debug()
     tools = [
         {
@@ -1418,6 +1465,8 @@ def test_anthropic_mcp_server_responses_api(model: str):
 
 
 def test_anthropic_prefix_prompt():
+    if os.getenv("ANTHROPIC_API_KEY") is None:
+        pytest.skip("requires ANTHROPIC_API_KEY")
     params = {
         "model": "anthropic/claude-sonnet-4-5-20250929",
         "messages": [
@@ -1524,6 +1573,9 @@ def test_anthropic_tool_cache_control():
 def test_anthropic_streaming():
     from litellm import completion
 
+    if os.getenv("ANTHROPIC_API_KEY") is None:
+        pytest.skip("requires ANTHROPIC_API_KEY")
+
     request_data = {
         "messages": [
             {
@@ -1578,6 +1630,8 @@ def test_anthropic_streaming():
 
 
 def test_anthropic_via_responses_api():
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        pytest.skip("ANTHROPIC_API_KEY not set")
     from litellm.types.llms.openai import ResponsesAPIStreamEvents
 
     response = litellm.responses(
@@ -1778,6 +1832,8 @@ def test_anthropic_strict_not_present():
 
 
 def test_anthropic_structured_output_chat_completion_api():
+    if os.getenv("ANTHROPIC_API_KEY") is None:
+        pytest.skip("requires ANTHROPIC_API_KEY")
     response = litellm.completion(
         model="claude-sonnet-4-5-20250929",
         messages=[{"role": "user", "content": "What is the capital of France?"}],

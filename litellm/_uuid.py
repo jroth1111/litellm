@@ -4,7 +4,10 @@ Internal unified UUID helper.
 Always uses fastuuid for performance.
 """
 
-import fastuuid as _uuid  # type: ignore
+try:
+    import fastuuid as _uuid  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    import uuid as _uuid
 
 
 # Expose a module-like alias so callers can use: uuid.uuid4()

@@ -327,6 +327,16 @@ class TestBedrockGovCloudSupport:
         from litellm import completion
         from unittest.mock import Mock
         import json
+
+        pytest.importorskip("botocore")
+        if not (
+            os.getenv("AWS_PROFILE")
+            or (
+                os.getenv("AWS_ACCESS_KEY_ID")
+                and os.getenv("AWS_SECRET_ACCESS_KEY")
+            )
+        ):
+            pytest.skip("AWS credentials not set")
         
         # Mock the HTTP client's post method to return responses
         def mock_post_side_effect(url, headers=None, data=None, **kwargs):

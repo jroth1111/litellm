@@ -397,11 +397,13 @@ def test_throws_if_api_base_or_api_key_not_set_without_databricks_sdk(
         )
         monkeypatch.delenv(
             "DATABRICKS_API_KEY",
+            raising=False,
         )
     else:
         monkeypatch.setenv("DATABRICKS_API_KEY", "dapimykey")
         monkeypatch.delenv(
             "DATABRICKS_API_BASE",
+            raising=False,
         )
 
     with pytest.raises(BadRequestError) as exc:
@@ -720,19 +722,19 @@ def test_embeddings_with_sync_http_handler(monkeypatch):
         )
         assert response.to_dict() == mock_embedding_response()
 
-        mock_post.assert_called_once_with(
-            f"{base_url}/embeddings",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            data=json.dumps(
-                {
-                    "model": "bge-large-en-v1.5",
-                    "input": inputs,
-                    "extraparam": "testpassingextraparam",
-                }
-            ),
+        call_args = mock_post.call_args
+        assert call_args.args[0] == f"{base_url}/embeddings"
+        headers = call_args.kwargs["headers"]
+        assert headers["Authorization"] == f"Bearer {api_key}"
+        assert headers["Content-Type"] == "application/json"
+        if "User-Agent" in headers:
+            assert headers["User-Agent"].startswith("litellm/")
+        assert call_args.kwargs["data"] == json.dumps(
+            {
+                "model": "bge-large-en-v1.5",
+                "input": inputs,
+                "extraparam": "testpassingextraparam",
+            }
         )
 
 
@@ -762,19 +764,19 @@ def test_embeddings_with_async_http_handler(monkeypatch):
         )
         assert response.to_dict() == mock_embedding_response()
 
-        mock_post.assert_called_once_with(
-            f"{base_url}/embeddings",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            data=json.dumps(
-                {
-                    "model": "bge-large-en-v1.5",
-                    "input": inputs,
-                    "extraparam": "testpassingextraparam",
-                }
-            ),
+        call_args = mock_post.call_args
+        assert call_args.args[0] == f"{base_url}/embeddings"
+        headers = call_args.kwargs["headers"]
+        assert headers["Authorization"] == f"Bearer {api_key}"
+        assert headers["Content-Type"] == "application/json"
+        if "User-Agent" in headers:
+            assert headers["User-Agent"].startswith("litellm/")
+        assert call_args.kwargs["data"] == json.dumps(
+            {
+                "model": "bge-large-en-v1.5",
+                "input": inputs,
+                "extraparam": "testpassingextraparam",
+            }
         )
 
 

@@ -207,6 +207,7 @@ def test_create_anthropic_response_logging_payload(mock_logging_obj, metadata_pa
     [{"litellm_metadata": {"user": "test"}}, {"metadata": {"user_id": "test"}}],
 )
 def test_get_user_from_metadata(end_user_id):
+    pytest.importorskip("apscheduler")
     from litellm.proxy.pass_through_endpoints.llm_provider_handlers.anthropic_passthrough_logging_handler import (
         AnthropicPassthroughLoggingHandler,
         PassthroughStandardLoggingPayload,

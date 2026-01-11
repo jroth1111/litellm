@@ -7,6 +7,9 @@ sys.path.insert(
 )  # Adds the parent directory to the system paths
 import litellm
 
+if not os.getenv("OPENROUTER_API_KEY"):
+    pytest.skip("OPENROUTER_API_KEY not set", allow_module_level=True)
+
 
 def test_completion_openrouter_reasoning_content():
     litellm._turn_on_debug()

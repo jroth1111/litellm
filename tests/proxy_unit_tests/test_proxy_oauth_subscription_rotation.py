@@ -12,7 +12,6 @@ auth_core = pytest.importorskip("litellm.auth.core")
 auth_file_store = pytest.importorskip("litellm.auth.file_store")
 auth_metrics = pytest.importorskip("litellm.auth.metrics")
 
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 AuthRecord = auth_core.AuthRecord
@@ -104,9 +103,8 @@ def client(tmp_path, monkeypatch, setup_and_teardown):
     )
 
     asyncio.run(proxy_server.initialize(config=str(config_fp)))
-    app = FastAPI()
-    app.include_router(proxy_server.router)
-    return TestClient(app), store
+    # Use the actual proxy_server.app which has exception handlers registered
+    return TestClient(proxy_server.app, raise_server_exceptions=False), store
 
 
 def test_same_request_rotation_on_429(client, monkeypatch):
@@ -374,3 +372,40 @@ def test_rotate_when_refresh_fails(client, monkeypatch):
     assert resp.status_code == 200, resp.text
     assert resp.json()["choices"][0]["message"]["content"] == "ok"
     assert calls == ["tok1", "tok2"]
+
+
+def test_auth_max_attempts_limits_rotation(client, monkeypatch):
+    client, _store = client
+    router = proxy_server.llm_router
+    previous = router.auth_max_attempts_per_request
+    previous_num_retries = router.num_retries
+    router.auth_max_attempts_per_request = 1
+    # Disable litellm's built-in retry mechanism to isolate auth rotation testing
+    router.num_retries = 0
+
+    calls = []
+
+    async def fake_acompletion(*_args, **kwargs):
+        token = kwargs.get("api_key")
+        calls.append(token)
+        raise litellm.RateLimitError(
+            message="rate limit",
+            llm_provider="openai",
+            model=str(kwargs.get("model", "")),
+        )
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    try:
+        resp = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "openai-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1,
+            },
+        )
+        assert resp.status_code == 429, resp.text
+        assert calls == ["tok1"]
+    finally:
+        router.auth_max_attempts_per_request = previous
+        router.num_retries = previous_num_retries

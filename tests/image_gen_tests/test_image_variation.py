@@ -50,6 +50,8 @@ def image_url():
 
 
 def test_openai_image_variation_openai_sdk(image_url):
+    if not os.getenv("OPENAI_API_KEY"):
+        pytest.skip("OPENAI_API_KEY not set")
     from openai import OpenAI
 
     client = OpenAI()
@@ -62,6 +64,9 @@ def test_openai_image_variation_openai_sdk(image_url):
 async def test_openai_image_variation_litellm_sdk(image_url, sync_mode):
     from litellm import image_variation, aimage_variation
 
+    if not os.getenv("OPENAI_API_KEY"):
+        pytest.skip("OPENAI_API_KEY not set")
+
     if sync_mode:
         image_variation(image=image_url, n=2, size="1024x1024")
     else:
@@ -72,6 +77,9 @@ def test_topaz_image_variation(image_url):
     from litellm import image_variation, aimage_variation
     from litellm.llms.custom_httpx.http_handler import HTTPHandler
     from unittest.mock import patch
+
+    if not os.getenv("TOPAZ_API_KEY"):
+        pytest.skip("TOPAZ_API_KEY not set")
 
     client = HTTPHandler()
     with patch.object(client, "post") as mock_post:

@@ -2,8 +2,11 @@
 Unified /v1/messages endpoint - (Anthropic Spec)
 """
 
+import uuid
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
 
 from litellm._logging import verbose_proxy_logger
 from litellm.proxy._types import *
@@ -17,6 +20,44 @@ from litellm.proxy.common_utils.http_parsing_utils import _read_request_body
 from litellm.types.utils import TokenCountResponse
 
 router = APIRouter()
+
+def _anthropic_error_type_for_status(status_code: int) -> str:
+    if status_code == status.HTTP_400_BAD_REQUEST:
+        return "invalid_request_error"
+    if status_code == status.HTTP_401_UNAUTHORIZED:
+        return "authentication_error"
+    if status_code == status.HTTP_403_FORBIDDEN:
+        return "permission_error"
+    if status_code == status.HTTP_404_NOT_FOUND:
+        return "not_found_error"
+    if status_code == status.HTTP_429_TOO_MANY_REQUESTS:
+        return "rate_limit_error"
+    if status_code == status.HTTP_503_SERVICE_UNAVAILABLE:
+        return "overloaded_error"
+    if status_code == status.HTTP_504_GATEWAY_TIMEOUT:
+        return "timeout_error"
+    return "api_error"
+
+
+def _anthropic_error_response(
+    message: object,
+    status_code: int,
+    *,
+    headers: Optional[dict] = None,
+    error_type: Optional[str] = None,
+) -> JSONResponse:
+    payload = {
+        "type": "error",
+        "error": {
+            "type": error_type or _anthropic_error_type_for_status(status_code),
+            "message": str(message),
+        },
+    }
+    return JSONResponse(
+        status_code=status_code,
+        content=payload,
+        headers=headers or {},
+    )
 
 
 @router.post(
@@ -113,6 +154,19 @@ async def anthropic_response(  # noqa: PLR0915
             )
 
         return _anthropic_response
+    except ProxyException as e:
+        status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        try:
+            if e.code is not None:
+                status_code = int(e.code)
+        except Exception:
+            status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        return _anthropic_error_response(
+            getattr(e, "message", str(e)),
+            status_code,
+            headers=getattr(e, "headers", None),
+            error_type=getattr(e, "type", None),
+        )
     except Exception as e:
         await proxy_logging_obj.post_call_failure_hook(
             user_api_key_dict=user_api_key_dict, original_exception=e, request_data=data
@@ -142,11 +196,10 @@ async def anthropic_response(  # noqa: PLR0915
         )
 
         error_msg = f"{str(e)}"
-        raise ProxyException(
-            message=getattr(e, "message", error_msg),
-            type=getattr(e, "type", "None"),
-            param=getattr(e, "param", "None"),
-            code=getattr(e, "status_code", 500),
+        status_code = getattr(e, "status_code", status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return _anthropic_error_response(
+            getattr(e, "message", error_msg),
+            status_code,
             headers=headers,
         )
 
@@ -218,7 +271,6 @@ async def count_tokens(
 
         # Convert the internal response to Anthropic API format
         return {"input_tokens": _token_response_dict.get("total_tokens", 0)}
-
     except HTTPException:
         raise
     except Exception as e:
@@ -229,4 +281,139 @@ async def count_tokens(
         )
         raise HTTPException(
             status_code=500, detail={"error": f"Internal server error: {str(e)}"}
+        )
+
+
+@router.post(
+    "/v1/complete",
+    tags=["[beta] Anthropic `/v1/complete`"],
+    dependencies=[Depends(user_api_key_auth)],
+)
+async def anthropic_complete(
+    request: Request,
+    fastapi_response: Response,
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):
+    """
+    Minimal Anthropic /v1/complete support (non-streaming).
+
+    Maps Anthropic completion params to OpenAI /v1/completions format.
+    """
+    from litellm.proxy.proxy_server import (
+        general_settings,
+        llm_router,
+        proxy_config,
+        proxy_logging_obj,
+        user_api_base,
+        user_max_tokens,
+        user_model,
+        user_request_timeout,
+        user_temperature,
+        version,
+    )
+
+    try:
+        data = await _read_request_body(request=request)
+        if data.get("stream"):
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "streaming not supported for /v1/complete"},
+            )
+
+        model = data.get("model")
+        prompt = data.get("prompt")
+        if not model or not prompt:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "model and prompt are required"},
+            )
+
+        openai_data = {
+            "model": model,
+            "prompt": prompt,
+            "max_tokens": data.get("max_tokens_to_sample") or data.get("max_tokens"),
+            "temperature": data.get("temperature"),
+            "top_p": data.get("top_p"),
+            "stop": data.get("stop_sequences"),
+        }
+        openai_data = {k: v for k, v in openai_data.items() if v is not None}
+
+        base_llm_response_processor = ProxyBaseLLMRequestProcessing(data=openai_data)
+        result = await base_llm_response_processor.base_process_llm_request(
+            request=request,
+            fastapi_response=fastapi_response,
+            user_api_key_dict=user_api_key_dict,
+            route_type="atext_completion",
+            proxy_logging_obj=proxy_logging_obj,
+            llm_router=llm_router,
+            general_settings=general_settings,
+            proxy_config=proxy_config,
+            select_data_generator=None,
+            model=None,
+            user_model=user_model,
+            user_temperature=user_temperature,
+            user_request_timeout=user_request_timeout,
+            user_max_tokens=user_max_tokens,
+            user_api_base=user_api_base,
+            version=version,
+        )
+
+        if isinstance(result, Response):
+            return result
+
+        if hasattr(result, "model_dump"):
+            payload = result.model_dump()
+        elif hasattr(result, "dict"):
+            payload = result.dict()  # type: ignore[call-arg]
+        elif isinstance(result, dict):
+            payload = result
+        else:
+            raise HTTPException(status_code=500, detail={"error": "unexpected response"})
+
+        choices = payload.get("choices") or []
+        completion_text = ""
+        stop_reason = None
+        if choices:
+            choice0 = choices[0] or {}
+            completion_text = (
+                choice0.get("text")
+                or (choice0.get("message") or {}).get("content")
+                or ""
+            )
+            stop_reason = choice0.get("finish_reason")
+
+        return {
+            "id": payload.get("id") or f"compl_{uuid.uuid4().hex}",
+            "model": payload.get("model") or model,
+            "completion": completion_text,
+            "stop_reason": stop_reason,
+        }
+    except ProxyException as e:
+        status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        try:
+            if e.code is not None:
+                status_code = int(e.code)
+        except Exception:
+            status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        return _anthropic_error_response(
+            getattr(e, "message", str(e)),
+            status_code,
+            headers=getattr(e, "headers", None),
+            error_type=getattr(e, "type", None),
+        )
+    except HTTPException as e:
+        status_code = e.status_code or status.HTTP_400_BAD_REQUEST
+        return _anthropic_error_response(
+            getattr(e, "detail", str(e)),
+            status_code,
+        )
+    except Exception as e:
+        verbose_proxy_logger.exception(
+            "litellm.proxy.anthropic_endpoints.anthropic_complete(): Exception occurred - {}".format(
+                str(e)
+            )
+        )
+        return _anthropic_error_response(
+            f"Internal server error: {str(e)}",
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
         )

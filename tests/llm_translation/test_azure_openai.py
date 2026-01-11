@@ -1,5 +1,6 @@
 import sys
 import os
+import importlib.util
 
 sys.path.insert(
     0, os.path.abspath("../../")
@@ -104,6 +105,23 @@ import litellm
 from litellm import completion
 import os
 
+AZURE_API_KEY = os.getenv("AZURE_API_KEY") or os.getenv("AZURE_OPENAI_API_KEY")
+AZURE_AD_TOKEN = os.getenv("AZURE_OPENAI_AD_TOKEN") or os.getenv("AZURE_AD_TOKEN")
+AZURE_API_BASE = os.getenv("AZURE_API_BASE") or os.getenv("AZURE_OPENAI_ENDPOINT")
+try:
+    AZURE_IDENTITY_AVAILABLE = (
+        importlib.util.find_spec("azure.identity") is not None
+    )
+except ModuleNotFoundError:
+    AZURE_IDENTITY_AVAILABLE = False
+
+
+def _skip_if_missing_azure_credentials(require_base: bool = False) -> None:
+    if not (AZURE_API_KEY or AZURE_AD_TOKEN):
+        pytest.skip("Azure credentials not set")
+    if require_base and not AZURE_API_BASE:
+        pytest.skip("Azure API base not set")
+
 
 @pytest.mark.parametrize(
     "input, call_type",
@@ -205,6 +223,10 @@ def test_process_azure_endpoint_url(api_base, model, expected_endpoint):
 
 
 class TestAzureEmbedding(BaseLLMEmbeddingTest):
+    @pytest.fixture(autouse=True)
+    def _skip_if_missing_azure_credentials(self):
+        _skip_if_missing_azure_credentials(require_base=True)
+
     def get_base_embedding_call_args(self) -> dict:
         return {
             "model": "azure/text-embedding-ada-002",
@@ -216,6 +238,9 @@ class TestAzureEmbedding(BaseLLMEmbeddingTest):
         return litellm.LlmProviders.AZURE
 
 
+@pytest.mark.skipif(
+    not AZURE_IDENTITY_AVAILABLE, reason="azure-identity not installed"
+)
 @patch("azure.identity.UsernamePasswordCredential")
 @patch("azure.identity.get_bearer_token_provider")
 def test_get_azure_ad_token_from_username_password(
@@ -476,6 +501,8 @@ def test_azure_max_retries_0(
     import litellm
     from litellm import completion
 
+    _skip_if_missing_azure_credentials(require_base=True)
+
     # Clear the LLM clients cache to ensure max_retries is set correctly
     litellm.in_memory_llm_clients_cache.flush_cache()
 
@@ -510,6 +537,8 @@ async def test_async_azure_max_retries_0(
 
     # Clear the LLM clients cache to ensure max_retries is set correctly
     litellm.in_memory_llm_clients_cache.flush_cache()
+
+    _skip_if_missing_azure_credentials(require_base=True)
 
     try:
         await acompletion(
@@ -614,6 +643,8 @@ def test_azure_safety_result():
     """Bubble up safety result from Azure OpenAI"""
     from litellm import completion
 
+    _skip_if_missing_azure_credentials(require_base=True)
+
     litellm._turn_on_debug()
 
     response = completion(
@@ -659,6 +690,7 @@ def test_completion_azure_deployment_id():
     Ensure deployment_id takes precedence over model.
     """
     litellm.set_verbose = True
+    _skip_if_missing_azure_credentials(require_base=True)
     response = completion(
         deployment_id="gpt-4.1-mini",
         model="gpt-3.5-turbo",

@@ -1,6 +1,7 @@
 import os
 import sys
 import traceback
+import importlib.util
 
 from dotenv import load_dotenv
 
@@ -17,6 +18,16 @@ sys.path.insert(
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+
+if importlib.util.find_spec("botocore") is None:
+    pytest.skip("botocore not installed", allow_module_level=True)
+if not (
+    os.getenv("AWS_PROFILE")
+    or (os.getenv("AWS_ACCESS_KEY_ID") and os.getenv("AWS_SECRET_ACCESS_KEY"))
+):
+    pytest.skip("AWS credentials not set", allow_module_level=True)
+if not (os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")):
+    pytest.skip("AWS region not set", allow_module_level=True)
 
 
 @pytest.mark.asyncio

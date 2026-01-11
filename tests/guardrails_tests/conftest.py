@@ -1,10 +1,20 @@
 # conftest.py
 
 import importlib
+import importlib.util
 import os
 import sys
 
 import pytest
+
+missing_deps = [
+    dep for dep in ("apscheduler", "fastapi") if importlib.util.find_spec(dep) is None
+]
+if missing_deps:
+    pytest.skip(
+        f"guardrails tests require proxy dependencies: {', '.join(missing_deps)}",
+        allow_module_level=True,
+    )
 
 sys.path.insert(
     0, os.path.abspath("../..")

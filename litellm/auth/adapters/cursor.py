@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from ..core import AuthRecord, RequestContext
-from .base import AdapterCapabilities, BaseSubscriptionAdapter
+from .base import AdapterCapabilities, BaseSubscriptionAdapter, LoginStart
 from .llms_oauth_loader import load_module
 from .utils import token_dataclass_to_metadata
 
@@ -28,8 +28,21 @@ class CursorSubscriptionAdapter(BaseSubscriptionAdapter):
             "litellm.auth.adapters._cursor_oauth_subscription",
         )
 
-    def start_login(self):
-        return self._oauth().start_cursor_login()
+    def start_login(
+        self,
+        *,
+        state: Optional[str] = None,
+        code_challenge: Optional[str] = None,
+        redirect_uri: Optional[str] = None,
+    ) -> LoginStart:
+        session = self._oauth().start_cursor_login()
+        login_url = getattr(session, "login_url", None) or getattr(session, "login", None)
+        return LoginStart(
+            method="cursor_poll",
+            url=str(login_url) if login_url else None,
+            instructions="Open the URL to continue the login flow.",
+            session=session,
+        )
 
     def poll_login(self, session, *, timeout_seconds: int) -> Dict[str, Any]:
         token = self._oauth().poll_for_token(session, max_wait_seconds=timeout_seconds)

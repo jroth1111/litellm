@@ -24,6 +24,7 @@ from .core import (
     AuthStatus,
     AuthStore,
     AuthStrategy,
+    RequestContext,
     provider_refresh_lead,
     refresh_backoff_for,
     refresh_evaluator_for,
@@ -104,7 +105,8 @@ class AuthMaintainer:
             return record
         try:
             refreshed = strat.refresh(
-                record, ctx=None  # type: ignore[arg-type]
+                record,
+                ctx=RequestContext(model=""),
             )
             refreshed.status = AuthStatus.ACTIVE
             refreshed.unavailable = False

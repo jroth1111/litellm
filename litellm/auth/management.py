@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from .core import AuthRecord, AuthStore
+from .file_store import _deserialize_auth, _serialize_auth
 
 
 def list_auths(store: AuthStore, namespace: str) -> List[AuthRecord]:
@@ -39,7 +40,7 @@ def export_auths(store: AuthStore, namespace: str, out_path: str) -> None:
     import json
 
     records = store.list(namespace)
-    payload = [record.__dict__ for record in records]
+    payload = [_serialize_auth(record) for record in records]
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
@@ -58,7 +59,7 @@ def import_auths(store: AuthStore, namespace: str, in_path: str) -> List[AuthRec
     for entry in payload:
         if not isinstance(entry, dict):
             continue
-        record = AuthRecord(**entry)
+        record = _deserialize_auth(entry)
         store.save(namespace, record)
         imported.append(record)
     return imported

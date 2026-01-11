@@ -1,3 +1,4 @@
+import base64
 import importlib.util
 import json
 import pathlib
@@ -20,6 +21,10 @@ def _load_module(path: pathlib.Path, name: str):
     return mod
 
 
+def _test_secret() -> str:
+    return base64.urlsafe_b64encode(b"\0" * 32).decode("utf-8").rstrip("=")
+
+
 class EncryptedFileStoreTests(unittest.TestCase):
     def test_encrypted_store_roundtrip_and_envelope_shape(self):
         # Minimal package scaffolding to avoid importing litellm/__init__.py
@@ -40,7 +45,7 @@ class EncryptedFileStoreTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             try:
-                store = EncryptedJsonFileAuthStore(tmpdir, secret="unit-test-secret")
+                store = EncryptedJsonFileAuthStore(tmpdir, secret=_test_secret())
             except Exception as e:
                 self.skipTest(f"encryption backend not available: {e}")
             rec = AuthRecord(
@@ -57,6 +62,7 @@ class EncryptedFileStoreTests(unittest.TestCase):
             env = json.loads(raw)
             self.assertIn("ct", env)
             self.assertIn("alg", env)
+            self.assertEqual(env.get("alg"), "aesgcm")
             self.assertNotIn("metadata", env)
 
             loaded = store.get("default", "r1")
@@ -95,7 +101,7 @@ class EncryptedFileStoreTests(unittest.TestCase):
             try:
                 enc = EncryptedJsonFileAuthStore(
                     tmpdir,
-                    secret="unit-test-secret",
+                    secret=_test_secret(),
                     allow_plaintext_fallback=True,
                 )
             except Exception as e:

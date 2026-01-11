@@ -4,6 +4,7 @@ import sys
 from datetime import datetime
 from unittest.mock import AsyncMock
 import pytest
+pytest.importorskip("respx")
 import httpx
 from respx import MockRouter
 from unittest.mock import patch, MagicMock, AsyncMock

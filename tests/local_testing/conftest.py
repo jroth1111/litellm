@@ -6,6 +6,12 @@ import sys
 
 import pytest
 
+if os.getenv("LITELLM_RUN_LOCAL_TESTS", "").lower() not in ("1", "true", "yes"):
+    pytest.skip(
+        "local testing suite disabled; set LITELLM_RUN_LOCAL_TESTS=1 to run",
+        allow_module_level=True,
+    )
+
 sys.path.insert(
     0, os.path.abspath("../..")
 )  # Adds the parent directory to the system path

@@ -21,6 +21,7 @@ os.environ["LANGFUSE_DEBUG"] = "True"
 import time
 
 import pytest
+pytest.importorskip("pytest_asyncio")
 import pytest_asyncio
 
 

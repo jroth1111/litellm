@@ -2,32 +2,47 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import secrets
-import threading
-import urllib.parse
 import webbrowser
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import click
 
-from litellm.auth.core import AuthRecord, AuthStatus, RequestContext
+from litellm.auth.core import AuthKind, AuthRecord, AuthStatus, RequestContext
 from litellm.auth.adapters.registry import (
     default_strategies,
     get_adapter,
     list_adapters,
     list_provider_descriptors,
 )
-from litellm.auth.crypto import resolve_auth_encryption_secret
+from litellm.auth.crypto import (
+    generate_auth_encryption_key,
+    resolve_auth_encryption_secret,
+)
 from litellm.auth.file_store import EncryptedJsonFileAuthStore, JsonFileAuthStore
-from litellm.auth.paths import default_auth_store_dir, find_git_root
+from litellm.auth.migration import maybe_migrate_legacy_auth_json
+from litellm.auth.oauth_callback import (
+    parse_redirect_uri,
+    start_local_callback_server,
+    wait_for_oauth_callback,
+)
+from litellm.auth.paths import (
+    default_auth_key_path,
+    default_auth_store_dir,
+    find_git_root,
+)
 from litellm.auth.pkce import generate_pkce_pair, generate_state
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# Backwards-compatible alias for tests and external callers.
+_parse_redirect_uri = parse_redirect_uri
 
 
 def _default_auth_id(provider: str) -> str:
@@ -38,181 +53,6 @@ def _default_auth_id(provider: str) -> str:
 
 def _safe_label(value: Optional[str]) -> str:
     return (value or "").strip()
-
-
-def _is_valid_redirect_url(url: Optional[str]) -> bool:
-    """
-    Validate URL to prevent XSS in OAuth callback pages.
-
-    Only allows http:// and https:// URLs. Rejects javascript:, data:,
-    and other potentially dangerous schemes.
-
-    Reference: CLIProxyAPIPlus oauth_server.go isValidURL()
-    """
-    if not url or not isinstance(url, str):
-        return False
-    url = url.strip()
-    return url.startswith("https://") or url.startswith("http://")
-
-
-def _parse_redirect_uri(redirect_uri: str) -> Tuple[str, int, str]:
-    parsed = urllib.parse.urlparse(redirect_uri)
-    host = parsed.hostname or "127.0.0.1"
-    if host == "localhost":
-        host = "127.0.0.1"
-    port = parsed.port
-    if port is None:
-        raise click.ClickException(f"redirect_uri missing port: {redirect_uri}")
-    path = parsed.path or "/"
-    return host, int(port), path
-
-
-class _CallbackResult:
-    def __init__(self) -> None:
-        self.code: Optional[str] = None
-        self.state: Optional[str] = None
-        self.error: Optional[str] = None
-        self.error_description: Optional[str] = None
-
-
-def _wait_for_oauth_callback(
-    redirect_uri: str,
-    expected_state: str,
-    timeout_seconds: int = 600,
-) -> str:
-    httpd, thread, result, done, _actual = _start_oauth_callback_server(
-        redirect_uri=redirect_uri, expected_state=expected_state
-    )
-    try:
-        if not done.wait(timeout_seconds):
-            raise click.ClickException(
-                f"Timed out waiting for OAuth callback on {redirect_uri}"
-            )
-    finally:
-        try:
-            httpd.shutdown()
-        except Exception:
-            pass
-        try:
-            httpd.server_close()
-        except Exception:
-            pass
-        try:
-            thread.join(timeout=1)
-        except Exception:
-            pass
-
-    if result.error:
-        detail = result.error_description or ""
-        raise click.ClickException(f"OAuth error: {result.error} {detail}".strip())
-    if not result.code:
-        raise click.ClickException("OAuth callback missing `code` parameter")
-    if not result.state:
-        raise click.ClickException("OAuth callback missing `state` parameter")
-    if result.state != expected_state:
-        raise click.ClickException("OAuth state mismatch")
-    return result.code
-
-
-def _start_oauth_callback_server(
-    redirect_uri: str,
-    expected_state: str,
-) -> tuple[HTTPServer, threading.Thread, _CallbackResult, threading.Event, str]:
-    """
-    Start the local HTTP callback server and return its runtime components.
-
-    Supports `redirect_uri` with port 0 to bind an ephemeral port (RFC 8252-style
-    loopback). This is opt-in; default provider redirects remain unchanged.
-    """
-    host, port, expected_path = _parse_redirect_uri(redirect_uri)
-    result = _CallbackResult()
-    done = threading.Event()
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802
-            parsed_req = urllib.parse.urlparse(self.path)
-            if parsed_req.path != expected_path:
-                self.send_response(404)
-                self.end_headers()
-                return
-
-            params = urllib.parse.parse_qs(parsed_req.query or "")
-            result.state = (params.get("state") or [None])[0]
-            if result.state != expected_state:
-                body = b"Invalid state. Please restart login."
-                self.send_response(400)
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-                result.error = "state_mismatch"
-                result.error_description = "State parameter mismatch"
-                done.set()
-                return
-
-            result.code = (params.get("code") or [None])[0]
-            result.error = (params.get("error") or [None])[0]
-            result.error_description = (params.get("error_description") or [None])[0]
-
-            if result.error:
-                body = b"Login failed. You can close this window."
-                self.send_response(200)
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-                done.set()
-                return
-
-            if not result.code:
-                body = b"Missing authorization code. Please retry login."
-                self.send_response(400)
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-                result.error = "missing_code"
-                result.error_description = "Missing authorization code"
-                done.set()
-                return
-
-            body = b"Login complete. You can close this window."
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            done.set()
-
-        def log_message(self, format: str, *args):  # noqa: A002
-            return
-
-    class ReuseHTTPServer(HTTPServer):
-        allow_reuse_address = True
-
-    try:
-        httpd = ReuseHTTPServer((host, port), Handler)
-    except OSError as e:
-        raise click.ClickException(
-            f"Failed to bind callback server on {host}:{port}: {e}"
-        ) from e
-
-    actual_host, actual_port = httpd.server_address[:2]
-    parsed = urllib.parse.urlparse(redirect_uri)
-    actual_redirect_uri = urllib.parse.urlunparse(
-        (
-            parsed.scheme or "http",
-            f"{actual_host}:{actual_port}",
-            expected_path,
-            "",
-            "",
-            "",
-        )
-    )
-
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-    thread.start()
-    return httpd, thread, result, done, actual_redirect_uri
 
 
 def _save_auth(
@@ -229,6 +69,7 @@ def _save_auth(
         id=auth_id,
         provider=provider,
         label=label,
+        kind=AuthKind.OAUTH,
         attributes=attributes or {},
         metadata=metadata,
         status=AuthStatus.ACTIVE,
@@ -296,17 +137,25 @@ def _build_store(
     encrypt: bool,
     encryption_key: Optional[str],
     allow_plaintext_fallback: bool,
+    namespace: str,
+    migrate_legacy: bool = True,
 ):
     _warn_if_git_repo_path(store_dir)
     if not encrypt:
-        return JsonFileAuthStore(store_dir)
+        store = JsonFileAuthStore(store_dir)
+        if migrate_legacy:
+            maybe_migrate_legacy_auth_json(store=store, namespace=namespace)
+        return store
     try:
         secret = resolve_auth_encryption_secret(encryption_key)
-        return EncryptedJsonFileAuthStore(
+        store = EncryptedJsonFileAuthStore(
             store_dir,
             secret=secret,
             allow_plaintext_fallback=allow_plaintext_fallback,
         )
+        if migrate_legacy:
+            maybe_migrate_legacy_auth_json(store=store, namespace=namespace)
+        return store
     except Exception as e:
         raise click.ClickException(str(e)) from e
 
@@ -314,6 +163,61 @@ def _build_store(
 @click.group(name="auth")
 def auth_cli() -> None:
     """Manage subscription OAuth credentials for LiteLLM (AuthStore)."""
+
+
+@auth_cli.group(name="key")
+def key_cli() -> None:
+    """Manage auth encryption keys."""
+
+
+@key_cli.command(name="init")
+@click.option(
+    "--path",
+    "key_path",
+    default=default_auth_key_path(),
+    show_default=True,
+    help="Write the generated key to this path (use '-' to skip writing).",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Overwrite existing key file if it already exists.",
+)
+@click.option(
+    "--stdout",
+    is_flag=True,
+    default=False,
+    help="Only print the key (do not write to disk).",
+)
+def key_init(key_path: str, force: bool, stdout: bool) -> None:
+    """
+    Generate a base64 32-byte encryption key for auth storage.
+    """
+    key = generate_auth_encryption_key()
+    if not stdout and key_path != "-":
+        key_path = os.path.expanduser(key_path)
+        key_dir = os.path.dirname(key_path)
+        if key_dir:
+            os.makedirs(key_dir, exist_ok=True)
+            try:
+                os.chmod(key_dir, 0o700)
+            except Exception:
+                pass
+        if os.path.exists(key_path) and not force:
+            raise click.ClickException(
+                f"Key file already exists: {key_path} (use --force to overwrite)"
+            )
+        with open(key_path, "w", encoding="utf-8") as f:
+            f.write(key + "\n")
+        try:
+            os.chmod(key_path, 0o600)
+        except Exception:
+            pass
+        click.echo(f"Saved key to {key_path}")
+
+    click.echo(f"LITELLM_AUTH_ENCRYPTION_KEY={key}")
+    click.echo(f"export LITELLM_AUTH_ENCRYPTION_KEY={key}")
 
 
 @auth_cli.command()
@@ -394,6 +298,7 @@ def login(
         encrypt=encrypt,
         encryption_key=encryption_key,
         allow_plaintext_fallback=allow_plaintext_fallback,
+        namespace=ns,
     )
     auth_id_final = auth_id or _default_auth_id(provider_key)
     open_browser = not no_open_browser
@@ -438,29 +343,30 @@ def login(
             f"--session-key is only supported for Anthropic, not {provider}"
         )
     elif login_flow == "device_code":
-        device = adapter.device_authorize()  # type: ignore[attr-defined]
-        url = getattr(device, "verification_uri_complete", None) or getattr(
-            device, "verification_uri", None
-        )
-        if url:
-            _maybe_open_browser(str(url), open_browser=open_browser)
-        user_code = getattr(device, "user_code", None)
-        if user_code:
-            click.echo(f"Enter code: {user_code}")
+        try:
+            login_start = adapter.start_login()  # type: ignore[attr-defined]
+        except Exception as e:
+            raise click.ClickException(str(e)) from e
+        if login_start.url:
+            _maybe_open_browser(str(login_start.url), open_browser=open_browser)
+        if login_start.user_code:
+            click.echo(f"Enter code: {login_start.user_code}")
         try:
             metadata = adapter.device_poll(  # type: ignore[attr-defined]
-                device, timeout_seconds=timeout_seconds
+                login_start.device_code, timeout_seconds=timeout_seconds
             )
         except Exception as e:
             raise click.ClickException(str(e)) from e
     elif login_flow == "cursor_poll":
-        session = adapter.start_login()  # type: ignore[attr-defined]
-        login_url = getattr(session, "login_url", None) or getattr(session, "login", None)
-        if login_url:
-            _maybe_open_browser(str(login_url), open_browser=open_browser)
+        try:
+            login_start = adapter.start_login()  # type: ignore[attr-defined]
+        except Exception as e:
+            raise click.ClickException(str(e)) from e
+        if login_start.url:
+            _maybe_open_browser(str(login_start.url), open_browser=open_browser)
         try:
             metadata = adapter.poll_login(  # type: ignore[attr-defined]
-                session, timeout_seconds=timeout_seconds
+                login_start.session, timeout_seconds=timeout_seconds
             )
         except Exception as e:
             raise click.ClickException(str(e)) from e
@@ -469,6 +375,10 @@ def login(
         state = generate_state()
         code_verifier, code_challenge = generate_pkce_pair()
         redirect = redirect_uri or getattr(adapter, "default_redirect_uri")
+        if not redirect:
+            raise click.ClickException(
+                f"Provider '{provider_key}' is missing a default redirect_uri."
+            )
         # Optional RFC 8252 loopback behavior: if the operator supplies a redirect
         # URI with port 0 (e.g., http://127.0.0.1:0/callback), bind an ephemeral port
         # first, then use the actual redirect URI for the authorize+exchange calls.
@@ -478,7 +388,7 @@ def login(
         callback_result = None
         callback_done = None
         try:
-            _, port, _ = _parse_redirect_uri(redirect)
+            _, port, _ = parse_redirect_uri(redirect)
             if port == 0:
                 (
                     callback_server,
@@ -486,16 +396,21 @@ def login(
                     callback_result,
                     callback_done,
                     actual_redirect,
-                ) = _start_oauth_callback_server(
+                ) = start_local_callback_server(
                     redirect_uri=redirect, expected_state=state
                 )
         except Exception:
             callback_server = None
 
-        auth_url = adapter.authorize_url(  # type: ignore[attr-defined]
-            state=state, code_challenge=code_challenge, redirect_uri=actual_redirect
-        )
-        _maybe_open_browser(str(auth_url), open_browser=open_browser)
+        try:
+            login_start = adapter.start_login(  # type: ignore[attr-defined]
+                state=state, code_challenge=code_challenge, redirect_uri=actual_redirect
+            )
+        except Exception as e:
+            raise click.ClickException(str(e)) from e
+
+        if login_start.url:
+            _maybe_open_browser(str(login_start.url), open_browser=open_browser)
         if callback_server is not None and callback_done is not None and callback_result is not None:
             try:
                 if not callback_done.wait(timeout_seconds):
@@ -525,9 +440,14 @@ def login(
                 raise click.ClickException("OAuth callback missing `code` parameter")
             code = callback_result.code
         else:
-            code = _wait_for_oauth_callback(
-                actual_redirect, expected_state=state, timeout_seconds=timeout_seconds
-            )
+            try:
+                code = wait_for_oauth_callback(
+                    redirect_uri=actual_redirect,
+                    expected_state=state,
+                    timeout_seconds=timeout_seconds,
+                )
+            except Exception as e:
+                raise click.ClickException(str(e)) from e
         try:
             metadata = adapter.exchange_code(  # type: ignore[attr-defined]
                 code=code,
@@ -610,6 +530,7 @@ def list_auths(
         encrypt=encrypt,
         encryption_key=encryption_key,
         allow_plaintext_fallback=allow_plaintext_fallback,
+        namespace=ns,
     )
     records = store.list(ns)
     load_errors = getattr(store, "last_load_errors", None) or []
@@ -683,6 +604,7 @@ def whoami(
         encrypt=encrypt,
         encryption_key=encryption_key,
         allow_plaintext_fallback=allow_plaintext_fallback,
+        namespace=ns,
     )
     records = []
     if auth_id:
@@ -757,6 +679,7 @@ def refresh(
         encrypt=encrypt,
         encryption_key=encryption_key,
         allow_plaintext_fallback=allow_plaintext_fallback,
+        namespace=ns,
     )
     rec = store.get(ns, auth_id)
     if rec is None:
@@ -884,6 +807,7 @@ def refresh_all(
         encrypt=encrypt,
         encryption_key=encryption_key,
         allow_plaintext_fallback=allow_plaintext_fallback,
+        namespace=ns,
     )
     records = store.list(ns)
     strategies = _default_strategies()
@@ -1012,6 +936,7 @@ def test_auth(
         encrypt=encrypt,
         encryption_key=encryption_key,
         allow_plaintext_fallback=allow_plaintext_fallback,
+        namespace=ns,
     )
 
     model_str = (model or "").strip()
@@ -1160,6 +1085,7 @@ def delete(
         encrypt=encrypt,
         encryption_key=encryption_key,
         allow_plaintext_fallback=allow_plaintext_fallback,
+        namespace=ns,
     )
     store.delete(ns, auth_id)
     click.echo(f"Deleted {auth_id}")
@@ -1239,6 +1165,7 @@ def revoke(
         encrypt=encrypt,
         encryption_key=encryption_key,
         allow_plaintext_fallback=allow_plaintext_fallback,
+        namespace=ns,
     )
 
     rec = store.get(ns, auth_id)
@@ -1465,6 +1392,7 @@ def status(
         encrypt=encrypt,
         encryption_key=encryption_key,
         allow_plaintext_fallback=allow_plaintext_fallback,
+        namespace=ns,
     )
     records = store.list(ns)
 

@@ -44,7 +44,10 @@ from openai.lib import _parsing, _pydantic
 from openai.types.chat.completion_create_params import ResponseFormat
 from pydantic import BaseModel
 from tiktoken import Encoding
-from tokenizers import Tokenizer
+try:
+    from tokenizers import Tokenizer
+except ImportError:  # pragma: no cover - optional dependency
+    Tokenizer = None
 
 import litellm
 
@@ -2028,6 +2031,8 @@ def _return_openai_tokenizer(model: str) -> SelectTokenizerResponse:
 
 
 def _return_huggingface_tokenizer(model: str) -> Optional[SelectTokenizerResponse]:
+    if Tokenizer is None:
+        return None
     if model in litellm.cohere_models and "command-r" in model:
         # cohere
         cohere_tokenizer = Tokenizer.from_pretrained(
@@ -2090,6 +2095,8 @@ def create_pretrained_tokenizer(
     Returns:
     dict: A dictionary with the tokenizer and its type.
     """
+    if Tokenizer is None:
+        raise ImportError("tokenizers is required for Hugging Face tokenizers")
 
     try:
         tokenizer = Tokenizer.from_pretrained(
@@ -2113,6 +2120,8 @@ def create_tokenizer(json: str):
     Returns:
     dict: A dictionary with the tokenizer and its type.
     """
+    if Tokenizer is None:
+        raise ImportError("tokenizers is required for Hugging Face tokenizers")
 
     tokenizer = Tokenizer.from_str(json)
     return {"type": "huggingface_tokenizer", "tokenizer": tokenizer}
@@ -2985,6 +2994,7 @@ def get_optional_params_embeddings(  # noqa: PLR0915
     
     # retrieve all parameters passed to the function
     passed_params = locals()
+    passed_params.pop("get_supported_openai_params", None)
     custom_llm_provider = passed_params.pop("custom_llm_provider", None)
     special_params = passed_params.pop("kwargs")
 
@@ -6848,6 +6858,16 @@ def _infer_valid_provider_from_env_vars(
         if custom_llm_provider and provider != custom_llm_provider:
             continue
 
+        if provider == "fireworks_ai":
+            if (
+                "FIREWORKS_API_KEY" in environ_keys
+                or "FIREWORKS_AI_API_KEY" in environ_keys
+                or "FIREWORKSAI_API_KEY" in environ_keys
+                or "FIREWORKS_AI_TOKEN" in environ_keys
+            ):
+                valid_providers.append(provider)
+            continue
+
         # edge case litellm has together_ai as a provider, it should be togetherai
         env_provider_1 = provider.replace("_", "")
         env_provider_2 = provider
@@ -6910,6 +6930,8 @@ def get_valid_models(
     """
 
     try:
+        from litellm.types.router import LiteLLM_Params
+
         ################################
         # init litellm_params
         #################################

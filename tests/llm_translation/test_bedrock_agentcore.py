@@ -3,6 +3,7 @@ Test Bedrock AgentCore integration
 """
 import os
 import sys
+import importlib.util
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -16,6 +17,16 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import pytest
+
+if importlib.util.find_spec("botocore") is None:
+    pytest.skip("botocore not installed", allow_module_level=True)
+if not (
+    os.getenv("AWS_PROFILE")
+    or (os.getenv("AWS_ACCESS_KEY_ID") and os.getenv("AWS_SECRET_ACCESS_KEY"))
+):
+    pytest.skip("AWS credentials not set", allow_module_level=True)
+if not (os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")):
+    pytest.skip("AWS region not set", allow_module_level=True)
 
 @pytest.mark.parametrize(
     "model", [
@@ -366,4 +377,3 @@ def test_bedrock_agentcore_without_api_key_uses_sigv4():
         # Session ID should still be present
         assert "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id" in headers
         assert headers["X-Amzn-Bedrock-AgentCore-Runtime-Session-Id"] == "sigv4-test-session"
-

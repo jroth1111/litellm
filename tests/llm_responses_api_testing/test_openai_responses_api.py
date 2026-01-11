@@ -858,6 +858,8 @@ async def test_openai_responses_litellm_router_with_prompt():
 
 def test_bad_request_bad_param_error():
     """Raise a BadRequestError when an invalid parameter value is provided"""
+    if not os.getenv("OPENAI_API_KEY"):
+        pytest.skip("OPENAI_API_KEY not set")
     try:
         litellm.responses(model="gpt-4o", input="This should fail", temperature=2000)
         pytest.fail("Expected BadRequestError but no exception was raised")
@@ -873,6 +875,8 @@ def test_bad_request_bad_param_error():
 @pytest.mark.asyncio()
 async def test_async_bad_request_bad_param_error():
     """Raise a BadRequestError when an invalid parameter value is provided"""
+    if not os.getenv("OPENAI_API_KEY"):
+        pytest.skip("OPENAI_API_KEY not set")
     try:
         await litellm.aresponses(
             model="gpt-4o", input="This should fail", temperature=2000
@@ -1207,6 +1211,10 @@ def test_basic_computer_use_preview_tool_call():
 
 def test_mcp_tools_with_responses_api():
     litellm._turn_on_debug()
+    if not os.getenv("OPENAI_API_KEY"):
+        pytest.skip("OPENAI_API_KEY not set")
+    if not os.getenv("ZAPIER_CI_CD_MCP_TOKEN"):
+        pytest.skip("ZAPIER_CI_CD_MCP_TOKEN not set")
     MCP_TOOLS = [
         {
             "type": "mcp",

@@ -82,6 +82,10 @@ class SubscriptionAdaptersTests(unittest.TestCase):
         self.assertEqual(url1, "https://api.openai.com/v1/models")
         url2 = md._models_endpoint("https://api.openai.com")  # type: ignore[attr-defined]
         self.assertEqual(url2, "https://api.openai.com/v1/models")
+        url3 = md._models_endpoint(  # type: ignore[attr-defined]
+            "https://generativelanguage.googleapis.com", api_version="v1beta"
+        )
+        self.assertEqual(url3, "https://generativelanguage.googleapis.com/v1beta/models")
 
     def test_parse_models_payload(self):
         md = _load_module(MODEL_DISCOVERY, "litellm.auth.model_discovery2")
@@ -89,6 +93,71 @@ class SubscriptionAdaptersTests(unittest.TestCase):
             {"data": [{"id": "gpt-4o"}, {"id": "gpt-4o-mini"}]}
         )
         self.assertEqual(parsed, ["gpt-4o", "gpt-4o-mini"])
+
+    def test_register_adapter_paths(self):
+        reg = _load_module(
+            ADAPTERS_DIR / "registry.py", "litellm.auth.adapters.registry_custom"
+        )
+        mod_name = "litellm.auth.adapters._custom_test_adapter"
+        module = types.ModuleType(mod_name)
+
+        class DummyAdapter:
+            provider = "custom"
+            capabilities = types.SimpleNamespace(login_flow="device")
+
+        module.DummyAdapter = DummyAdapter
+        sys.modules[mod_name] = module
+
+        reg.register_adapter_paths([f"{mod_name}:DummyAdapter"])
+        adapter = reg.get_adapter("custom")
+        self.assertIsNotNone(adapter)
+        self.assertEqual(getattr(adapter, "provider", None), "custom")
+        reg.reset_adapter_paths()
+
+    def test_background_model_refresher_registration(self):
+        md = _load_module(MODEL_DISCOVERY, "litellm.auth.model_discovery_bg")
+        refresher = md.BackgroundModelRefresher(
+            cache=md.ModelDiscoveryCache(ttl_seconds=60),
+            interval_seconds=30,
+        )
+
+        # Test provider registration
+        refresher.register_provider(
+            provider="test_provider",
+            base_url="https://api.example.com",
+            auth_records=lambda: [],
+            prepare_headers=lambda h, c, a: h,
+        )
+
+        # Verify registration
+        key = "test_provider:https://api.example.com"
+        self.assertIn(key, refresher._providers)
+        self.assertEqual(refresher._providers[key]["provider"], "test_provider")
+
+        # Test unregistration
+        refresher.unregister_provider("test_provider", "https://api.example.com")
+        self.assertNotIn(key, refresher._providers)
+
+    def test_background_model_refresher_start_stop(self):
+        md = _load_module(MODEL_DISCOVERY, "litellm.auth.model_discovery_bg2")
+        refresher = md.BackgroundModelRefresher(
+            cache=md.ModelDiscoveryCache(ttl_seconds=60),
+            interval_seconds=30,
+        )
+
+        # Test start
+        refresher.start()
+        self.assertIsNotNone(refresher._thread)
+        self.assertTrue(refresher._thread.is_alive())
+
+        # Starting again should be a no-op
+        original_thread = refresher._thread
+        refresher.start()
+        self.assertIs(refresher._thread, original_thread)
+
+        # Test stop
+        refresher.stop()
+        self.assertFalse(refresher._thread.is_alive())
 
 
 if __name__ == "__main__":

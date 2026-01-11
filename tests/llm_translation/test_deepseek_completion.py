@@ -1,4 +1,5 @@
 from base_llm_unit_tests import BaseLLMChatTest
+import os
 import pytest
 import litellm
 
@@ -108,6 +109,8 @@ async def test_deepseek_provider_async_completion(stream):
 
 def test_completion_cost_deepseek():
     litellm.set_verbose = True
+    if not os.getenv("DEEPSEEK_API_KEY"):
+        pytest.skip("DEEPSEEK_API_KEY not set")
     model_name = "deepseek/deepseek-chat"
     messages_1 = [
         {

@@ -34,6 +34,21 @@ def default_token_store_dir() -> str:
     return str(_xdg_config_home() / "litellm" / "auth-tokens")
 
 
+def default_auth_key_path() -> str:
+    """
+    Default filesystem path for storing the auth encryption key.
+    """
+    return str(_xdg_config_home() / "litellm" / "auth.key")
+
+
+def legacy_auth_json_path(store_dir: Optional[str] = None) -> str:
+    """
+    Legacy auth.json location used by v1 auth storage.
+    """
+    base = Path(store_dir).expanduser() if store_dir else Path(default_auth_store_dir())
+    return str(base.parent / "auth.json")
+
+
 def find_git_root(path: str) -> Optional[str]:
     """
     Returns the nearest parent containing a `.git` directory/file, else None.
@@ -48,4 +63,3 @@ def find_git_root(path: str) -> Optional[str]:
         if git.exists():
             return str(parent)
     return None
-

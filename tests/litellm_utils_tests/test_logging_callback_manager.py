@@ -54,6 +54,7 @@ def test_add_string_callback():
 
 
 def test_duplicate_langfuse_logger_test():
+    pytest.importorskip("langfuse")
     manager = LoggingCallbackManager()
     for _ in range(10):
         langfuse_logger = LangfusePromptManagement()
@@ -63,6 +64,7 @@ def test_duplicate_langfuse_logger_test():
 
 
 def test_duplicate_multiple_loggers_test():
+    pytest.importorskip("langfuse")
     manager = LoggingCallbackManager()
     for _ in range(10):
         langfuse_logger = LangfusePromptManagement()
@@ -370,4 +372,3 @@ def test_generic_api_compatible_callbacks_json_unknown_callback():
     # Should return the string unchanged
     assert result == "unknown_callback", "Unknown callback should be returned as-is"
     assert isinstance(result, str), "Unknown callback should remain a string"
-

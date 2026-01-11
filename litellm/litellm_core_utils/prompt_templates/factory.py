@@ -8,7 +8,10 @@ import xml.etree.ElementTree as ET
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Union, cast, overload
 
-from jinja2.sandbox import ImmutableSandboxedEnvironment
+try:
+    from jinja2.sandbox import ImmutableSandboxedEnvironment
+except ImportError:  # pragma: no cover - optional dependency
+    ImmutableSandboxedEnvironment = None
 
 import litellm
 import litellm.types
@@ -591,6 +594,8 @@ async def ahf_chat_template(
     model: str, messages: list, chat_template: Optional[Any] = None
 ):
     """HuggingFace chat template (async version)"""
+    if ImmutableSandboxedEnvironment is None:
+        raise ImportError("jinja2 is required for HuggingFace chat templates")
     from litellm.litellm_core_utils.prompt_templates.huggingface_template_handler import (
         _aget_chat_template_file,
         _aget_tokenizer_config,
@@ -618,6 +623,8 @@ async def ahf_chat_template(
 
 def hf_chat_template(model: str, messages: list, chat_template: Optional[Any] = None):
     """HuggingFace chat template (sync version)"""
+    if ImmutableSandboxedEnvironment is None:
+        raise ImportError("jinja2 is required for HuggingFace chat templates")
     from litellm.litellm_core_utils.prompt_templates.huggingface_template_handler import (
         _get_chat_template_file,
         _get_tokenizer_config,

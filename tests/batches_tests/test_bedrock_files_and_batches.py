@@ -7,6 +7,7 @@ import os
 import sys
 import traceback
 import tempfile
+import importlib.util
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,6 +21,16 @@ from typing import Optional
 import litellm
 from unittest.mock import patch, MagicMock
 import httpx
+
+if importlib.util.find_spec("botocore") is None:
+    pytest.skip("botocore not installed", allow_module_level=True)
+if not (
+    os.getenv("AWS_PROFILE")
+    or (os.getenv("AWS_ACCESS_KEY_ID") and os.getenv("AWS_SECRET_ACCESS_KEY"))
+):
+    pytest.skip("AWS credentials not set", allow_module_level=True)
+if not (os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")):
+    pytest.skip("AWS region not set", allow_module_level=True)
 
 
 @pytest.mark.asyncio()
@@ -242,4 +253,3 @@ def test_bedrock_batch_with_encryption_key_in_post_request():
     assert request_data["outputDataConfig"]["s3OutputDataConfig"]["s3EncryptionKeyId"] == test_kms_key_id
     
     print("SUCCESS: s3_encryption_key_id properly included in AWS POST request")
-

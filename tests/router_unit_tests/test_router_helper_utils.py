@@ -83,11 +83,12 @@ def test_print_deployment(model_list):
     """Test if the api key is masked correctly"""
 
     router = Router(model_list=model_list)
+    api_key = os.getenv("OPENAI_API_KEY") or "test-key"
     deployment = {
         "model_name": "gpt-3.5-turbo",
         "litellm_params": {
             "model": "gpt-3.5-turbo",
-            "api_key": os.getenv("OPENAI_API_KEY"),
+            "api_key": api_key,
         },
     }
     printed_deployment = router.print_deployment(deployment)

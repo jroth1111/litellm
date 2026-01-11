@@ -10,6 +10,7 @@ Found under `kwargs["standard_logging_object"]`. This is a standard payload, log
 | `id` | `str` | Unique identifier |
 | `trace_id` | `str` | Trace multiple LLM calls belonging to same overall request |
 | `call_type` | `str` | Type of call |
+| `stream` | `Optional[bool]` | Whether the request was streamed |
 | `response_cost` | `float` | Cost of the response in USD ($) |
 | `cost_breakdown` | `Optional[CostBreakdown]` | Detailed cost breakdown object |
 | `response_cost_failure_debug_info` | `StandardLoggingModelCostFailureDebugInformation` | Debug information if cost tracking fails |
@@ -40,6 +41,8 @@ Found under `kwargs["standard_logging_object"]`. This is a standard payload, log
 | `error_information` | `Optional[StandardLoggingPayloadErrorInformation]` | Optional error information |
 | `model_parameters` | `dict` | Model parameters |
 | `hidden_params` | `StandardLoggingHiddenParams` | Hidden parameters |
+| `standard_built_in_tools_params` | `Optional[StandardBuiltInToolsParams]` | Built-in tool parameters used for cost calculation |
+| `guardrail_information` | `Optional[list[StandardLoggingGuardrailInformation]]` | Guardrail information |
 
 ## Cost Breakdown
 
@@ -70,10 +73,17 @@ class CostBreakdown(TypedDict, total=False):
 |-------|------|-------------|
 | `user_api_key_hash` | `Optional[str]` | Hash of the litellm virtual key |
 | `user_api_key_alias` | `Optional[str]` | Alias of the API key |
+| `user_api_key_spend` | `Optional[float]` | Total spend associated with the key |
+| `user_api_key_max_budget` | `Optional[float]` | Max budget for the key |
+| `user_api_key_budget_reset_at` | `Optional[str]` | Budget reset timestamp for the key |
 | `user_api_key_org_id` | `Optional[str]` | Organization ID associated with the key |
 | `user_api_key_team_id` | `Optional[str]` | Team ID associated with the key |
 | `user_api_key_user_id` | `Optional[str]` | User ID associated with the key |
+| `user_api_key_user_email` | `Optional[str]` | User email associated with the key |
 | `user_api_key_team_alias` | `Optional[str]` | Team alias associated with the key |
+| `user_api_key_end_user_id` | `Optional[str]` | End user ID associated with the key |
+| `user_api_key_request_route` | `Optional[str]` | Request route used for the key |
+| `user_api_key_auth_metadata` | `Optional[Dict[str, str]]` | Auth metadata associated with the key |
 
 ## StandardLoggingMetadata
 
@@ -123,6 +133,7 @@ Inherits from `StandardLoggingUserAPIKeyMetadata` and adds:
 | `cache_key` | `Optional[str]` | Optional cache key |
 | `api_base` | `Optional[str]` | Optional API base URL |
 | `response_cost` | `Optional[str]` | Optional response cost |
+| `litellm_overhead_time_ms` | `Optional[float]` | LiteLLM overhead time in ms |
 | `additional_headers` | `Optional[StandardLoggingAdditionalHeaders]` | Additional headers |
 | `batch_models` | `Optional[List[str]]` | Only set for Batches API. Lists the models used for cost calculation |
 | `litellm_model_name` | `Optional[str]` | Model name sent in request |

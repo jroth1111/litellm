@@ -13,6 +13,9 @@ sys.path.insert(
     0, os.path.abspath("../")
 )  # Adds the parent directory to the system path
 
+if not os.getenv("OPENAI_API_KEY"):
+    pytest.skip("OPENAI_API_KEY not set", allow_module_level=True)
+
 import litellm
 from pydantic import BaseModel
 from litellm import utils, Router

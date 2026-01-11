@@ -2713,6 +2713,42 @@ class ProxyConfig:
                         f"Deployment '{model.get('model_name', '')}' has invalid auth_mode={auth_mode_raw!r} "
                         "(expected 'auto', 'subscription', 'api_key', or 'none')."
                     )
+                auth_cfg = model.get("auth")
+                if auth_cfg is not None:
+                    if not isinstance(auth_cfg, dict):
+                        raise ValueError(
+                            f"Deployment '{model.get('model_name', '')}' has invalid auth config (expected dict)."
+                        )
+                    rotation_cfg = auth_cfg.get("rotation")
+                    if rotation_cfg is not None and not isinstance(rotation_cfg, dict):
+                        raise ValueError(
+                            f"Deployment '{model.get('model_name', '')}' has invalid auth.rotation (expected dict)."
+                        )
+                    if isinstance(rotation_cfg, dict):
+                        max_attempts = rotation_cfg.get("maxAttempts") or rotation_cfg.get(
+                            "max_attempts"
+                        )
+                        if max_attempts is not None:
+                            try:
+                                int(max_attempts)
+                            except Exception as e:
+                                raise ValueError(
+                                    f"Deployment '{model.get('model_name', '')}' auth.rotation.maxAttempts must be an int."
+                                ) from e
+                        rotate_on = rotation_cfg.get("rotateOnStatus") or rotation_cfg.get(
+                            "rotate_on_status"
+                        )
+                        if rotate_on is not None:
+                            if not isinstance(rotate_on, list):
+                                raise ValueError(
+                                    f"Deployment '{model.get('model_name', '')}' auth.rotation.rotateOnStatus must be a list."
+                                )
+                            try:
+                                [int(code) for code in rotate_on]
+                            except Exception as e:
+                                raise ValueError(
+                                    f"Deployment '{model.get('model_name', '')}' auth.rotation.rotateOnStatus must contain ints."
+                                ) from e
                 if auth_mode == "subscription":
                     has_subscription_deployments = True
                     configured_api_key = model.get("litellm_params", {}).get("api_key")
@@ -2798,6 +2834,7 @@ class ProxyConfig:
             _stop_subscription_auth_maintainer()
             app.state.subscription_auth_store = None
             app.state.subscription_auth_namespace = "default"
+            app.state.subscription_auth_strategies = None
 
         if not (auth_settings and isinstance(auth_settings, dict)):
             if has_subscription_deployments:
@@ -2816,12 +2853,16 @@ class ProxyConfig:
 
             if auth_cfg.enabled:
                 _disable_subscription_auth_state()
-                from litellm.auth.adapters.registry import default_strategies
+                from litellm.auth.adapters.registry import (
+                    default_strategies,
+                    register_adapter_paths,
+                )
                 from litellm.auth.crypto import resolve_auth_encryption_secret
                 from litellm.auth.file_store import (
                     EncryptedJsonFileAuthStore,
                     JsonFileAuthStore,
                 )
+                from litellm.auth.migration import maybe_migrate_legacy_auth_json
                 from litellm.auth.maintenance import AuthMaintainer
 
                 store_dir = auth_cfg.store_dir
@@ -2846,6 +2887,8 @@ class ProxyConfig:
                 else:
                     store = JsonFileAuthStore(store_dir)
 
+                if auth_cfg.adapter_paths:
+                    register_adapter_paths(auth_cfg.adapter_paths)
                 strategies = default_strategies()
 
                 router_params["auth_store"] = store
@@ -2853,8 +2896,10 @@ class ProxyConfig:
                 router_params["auth_strategies"] = strategies
 
                 # Expose store/namespace to the management router + shutdown hook via app.state.
+                maybe_migrate_legacy_auth_json(store=store, namespace=namespace)
                 app.state.subscription_auth_store = store
                 app.state.subscription_auth_namespace = namespace
+                app.state.subscription_auth_strategies = strategies
 
                 if start_maintainer:
                     maint = AuthMaintainer(
@@ -4847,6 +4892,37 @@ class ProxyStartupEvent:
                 )
                 pass
 
+        if llm_router is not None and general_settings.get(
+            "include_discovered_models", False
+        ):
+            interval = general_settings.get(
+                "auth_model_discovery_interval_seconds", 900
+            )
+            try:
+                interval = int(interval)
+            except Exception:
+                interval = 900
+            if interval > 0:
+                try:
+                    from litellm.proxy.utils import refresh_oauth_model_discovery
+
+                    scheduler.add_job(
+                        refresh_oauth_model_discovery,
+                        "interval",
+                        seconds=interval,
+                        args=[llm_router],
+                        id="oauth_model_discovery_job",
+                        replace_existing=True,
+                        misfire_grace_time=APSCHEDULER_MISFIRE_GRACE_TIME,
+                    )
+                    verbose_proxy_logger.info(
+                        f"OAuth model discovery refresh scheduled every {interval} seconds"
+                    )
+                except Exception as e:
+                    verbose_proxy_logger.debug(
+                        f"Failed to schedule OAuth model discovery refresh: {e}"
+                    )
+
         # MEMORY LEAK FIX: Start scheduler with paused=False to avoid backlog processing
         # Do NOT reset job times to "now" as this can trigger the memory leak
         # The misfire_grace_time and coalesce settings will handle any missed runs properly
@@ -5063,15 +5139,29 @@ class ProxyStartupEvent:
 @router.get(
     "/models", dependencies=[Depends(user_api_key_auth)], tags=["model management"]
 )  # if project requires model list
+@router.get(
+    "/anthropic/v1/models",
+    dependencies=[Depends(user_api_key_auth)],
+    tags=["model management"],
+)
+@router.get(
+    "/anthropic/models",
+    dependencies=[Depends(user_api_key_auth)],
+    tags=["model management"],
+)
 async def model_list(
+    request: Request,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
     return_wildcard_routes: Optional[bool] = False,
     team_id: Optional[str] = None,
     include_model_access_groups: Optional[bool] = False,
     only_model_access_groups: Optional[bool] = False,
     include_metadata: Optional[bool] = False,
-    include_discovered_models: Optional[bool] = False,
+    include_discovered_models: Optional[bool] = None,
     fallback_type: Optional[str] = None,
+    after_id: Optional[str] = None,
+    before_id: Optional[str] = None,
+    limit: Optional[int] = None,
 ):
     """
     Use `/model/info` - to get detailed model information, example - pricing, mode, etc.
@@ -5105,10 +5195,27 @@ async def model_list(
         user_api_key_cache=user_api_key_cache,
     )
 
+    include_discovered = include_discovered_models
+    if include_discovered is None:
+        include_discovered = bool(
+            (general_settings or {}).get("include_discovered_models", False)
+        )
+        if (
+            not include_discovered
+            and llm_router is not None
+            and getattr(llm_router, "auth_store", None) is not None
+        ):
+            include_discovered = True
+
+    use_anthropic_format = request.url.path.startswith("/anthropic/")
     # Build response data
     model_data = []
+    model_ids = []
     seen_models = set()
     for model in all_models:
+        if model not in seen_models:
+            model_ids.append(model)
+            seen_models.add(model)
         model_info = create_model_info_response(
             model_id=model,
             provider="openai",
@@ -5117,90 +5224,46 @@ async def model_list(
             llm_router=llm_router,
         )
         model_data.append(model_info)
-        seen_models.add(model)
 
-    if include_discovered_models and llm_router is not None:
+    if include_discovered and llm_router is not None:
         try:
-            from litellm.auth.model_discovery import discover_models_with_rotation
-            from litellm.auth.core import RequestContext
+            from litellm.proxy.utils import discover_oauth_models_for_router
 
-            store = getattr(llm_router, "auth_store", None)
-            namespace = getattr(llm_router, "auth_namespace", None)
-            strategies = getattr(llm_router, "auth_strategies", {}) or {}
-            if store is not None and namespace and strategies:
-                auth_records = store.list(namespace)
-                deployments = llm_router.get_model_list() or []
-
-                # Discover once per unique (provider, base_url) pair.
-                candidates = {}
-                for dep in deployments:
-                    if (
-                        str(dep.get("auth_mode", "auto") or "auto").strip().lower()
-                        != "subscription"
-                    ):
-                        continue
-                    litellm_params = dep.get("litellm_params") or {}
-                    provider_model = litellm_params.get("model") or ""
-                    provider_key = (
-                        provider_model.split("/", 1)[0] if "/" in provider_model else provider_model
-                    ).strip().lower()
-                    if not provider_key:
-                        continue
-                    strat = strategies.get(provider_key)
-                    if strat is None:
-                        continue
-                    caps = getattr(strat, "capabilities", None)
-                    if not getattr(caps, "supports_models_list", False):
-                        continue
-                    base_url = litellm_params.get("api_base") or ""
-                    if not base_url:
-                        # Conservative defaults for the only currently supported upstreams.
-                        if provider_key == "openai":
-                            base_url = "https://api.openai.com/v1"
-                        elif provider_key == "cursor":
-                            base_url = os.getenv("CURSOR_API_BASE") or "https://api2.cursor.sh/hf/v1"
-                    if not base_url:
-                        continue
-                    candidates[(provider_key, base_url)] = strat
-
-                for (provider_key, base_url), strat in candidates.items():
-                    def _refresh_one(rec):
-                        if not getattr(strat, "supports_refresh", True):
-                            raise ValueError("refresh not supported")
-                        refreshed = strat.refresh(rec, ctx=RequestContext(model=""))  # type: ignore[arg-type]
-                        store.save(namespace, refreshed)
-                        return refreshed
-
-                    entry = await discover_models_with_rotation(
-                        provider=provider_key,
-                        base_url=base_url,
-                        auth_records=auth_records,
-                        prepare_headers=strat.prepare,
-                        refresh_record=_refresh_one if getattr(strat, "supports_refresh", True) else None,
-                        timeout_seconds=10.0,
-                    )
-                    for mid in entry.models:
-                        if mid in seen_models:
-                            continue
-                        info = create_model_info_response(
-                            model_id=mid,
-                            provider=provider_key,
-                            include_metadata=include_metadata or False,
-                            fallback_type=fallback_type,
-                            llm_router=llm_router,
-                        )
-                        if include_metadata:
-                            info.setdefault("metadata", {})
-                            info["metadata"]["discovered"] = True
-                            info["metadata"]["discovery_provider"] = provider_key
-                            info["metadata"]["discovery_base_url"] = base_url
-                            if entry.source_auth_id:
-                                info["metadata"]["discovery_source_auth_id"] = entry.source_auth_id
-                        model_data.append(info)
-                        seen_models.add(mid)
+            discovered_models = await discover_oauth_models_for_router(
+                llm_router=llm_router
+            )
+            for entry in discovered_models:
+                if entry.model_id in seen_models:
+                    continue
+                model_ids.append(entry.model_id)
+                info = create_model_info_response(
+                    model_id=entry.model_id,
+                    provider=entry.provider,
+                    include_metadata=include_metadata or False,
+                    fallback_type=fallback_type,
+                    llm_router=llm_router,
+                )
+                if include_metadata:
+                    info.setdefault("metadata", {})
+                    info["metadata"]["discovered"] = True
+                    info["metadata"]["discovery_provider"] = entry.provider
+                    info["metadata"]["discovery_base_url"] = entry.base_url
+                    if entry.source_auth_id:
+                        info["metadata"][
+                            "discovery_source_auth_id"
+                        ] = entry.source_auth_id
+                model_data.append(info)
+                seen_models.add(entry.model_id)
         except Exception:
             # Discovery is best-effort; never fail the endpoint.
             pass
+
+    if use_anthropic_format:
+        from litellm.proxy.utils import build_anthropic_model_list_response
+
+        return build_anthropic_model_list_response(
+            model_ids, after_id=after_id, before_id=before_id, limit=limit
+        )
 
     return dict(
         data=model_data,
@@ -5218,8 +5281,19 @@ async def model_list(
     dependencies=[Depends(user_api_key_auth)],
     tags=["model management"],
 )
+@router.get(
+    "/anthropic/v1/models/{model_id}",
+    dependencies=[Depends(user_api_key_auth)],
+    tags=["model management"],
+)
+@router.get(
+    "/anthropic/models/{model_id}",
+    dependencies=[Depends(user_api_key_auth)],
+    tags=["model management"],
+)
 async def model_info(
     model_id: str,
+    request: Request,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ):
     """
@@ -5270,6 +5344,12 @@ async def model_info(
 
     # Use the actual litellm model from the deployment to get provider info
     _, provider, _, _ = litellm.get_llm_provider(model=deployment.litellm_params.model)
+
+    use_anthropic_format = request.url.path.startswith("/anthropic/")
+    if use_anthropic_format:
+        from litellm.proxy.utils import create_anthropic_model_info_response
+
+        return create_anthropic_model_info_response(model_id)
 
     # Return the model information in the same format as the list endpoint
     return create_model_info_response(

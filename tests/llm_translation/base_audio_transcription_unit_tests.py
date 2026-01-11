@@ -40,6 +40,23 @@ class BaseLLMAudioTranscriptionTest(ABC):
         """Must return the custom llm provider"""
         pass
 
+    @pytest.fixture(autouse=True)
+    def _skip_if_missing_credentials(self):
+        provider = self.get_custom_llm_provider()
+        required_env = {
+            litellm.LlmProviders.DEEPGRAM: ("DEEPGRAM_API_KEY",),
+            litellm.LlmProviders.OPENAI: ("OPENAI_API_KEY",),
+            litellm.LlmProviders.FIREWORKS_AI: ("FIREWORKS_API_KEY",),
+            litellm.LlmProviders.ELEVENLABS: ("ELEVENLABS_API_KEY",),
+        }.get(provider)
+
+        if required_env and not any(os.getenv(key) for key in required_env):
+            pytest.skip(f"Missing credentials for provider '{provider.value}'")
+
+        if provider == litellm.LlmProviders.ELEVENLABS:
+            if os.getenv("ELEVENLABS_API_KEY") == "test-elevenlabs-key":
+                pytest.skip("ELEVENLABS_API_KEY is a placeholder")
+
     def test_audio_transcription(self):
         """
         Test that the audio transcription is translated correctly.

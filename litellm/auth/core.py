@@ -10,9 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+import os
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Protocol
 
 __all__ = [
+    "AuthKind",
     "AuthStatus",
     "QuotaState",
     "ModelState",
@@ -32,6 +34,14 @@ class AuthStatus(str, Enum):
     DISABLED = "disabled"
     EXPIRED = "expired"
     ERROR = "error"
+
+
+class AuthKind(str, Enum):
+    """Credential kind for auth records."""
+
+    OAUTH = "oauth"
+    API = "api"
+    WELLKNOWN = "wellknown"
 
 
 @dataclass
@@ -84,6 +94,7 @@ class AuthRecord:
     id: str
     provider: str
     label: str = ""
+    kind: AuthKind = AuthKind.OAUTH
     attributes: Dict[str, str] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
     status: AuthStatus = AuthStatus.ACTIVE
@@ -103,12 +114,20 @@ class AuthRecord:
     completion_tokens: int = 0
     last_request_at: Optional[datetime] = None
 
+    def __post_init__(self) -> None:
+        if isinstance(self.kind, str):
+            try:
+                self.kind = AuthKind(self.kind)
+            except Exception:
+                self.kind = AuthKind.OAUTH
+
     def clone(self) -> "AuthRecord":
         """Shallow copy with isolated mutable fields."""
         return AuthRecord(
             id=self.id,
             provider=self.provider,
             label=self.label,
+            kind=self.kind,
             attributes=dict(self.attributes),
             metadata=dict(self.metadata),
             status=self.status,
@@ -166,25 +185,84 @@ class AuthRecord:
           - ("api_key", obfuscated) if attributes contain api_key-like entries
           - ("", "") otherwise
         """
+        kind = (
+            self.kind.value
+            if isinstance(self.kind, AuthKind)
+            else str(self.kind or AuthKind.OAUTH.value)
+        ).lower()
         meta = self.metadata or {}
+        attrs = self.attributes or {}
         email = meta.get("email") or meta.get("user")
         project = meta.get("project_id") or meta.get("tenant") or meta.get("workspace")
         email_str = str(email).strip() if email else ""
         project_str = str(project).strip() if project else ""
-        if email_str and project_str:
+        if kind == AuthKind.OAUTH.value and email_str and project_str:
             return "oauth", f"{email_str} ({project_str})"
-        if email_str:
+        if kind == AuthKind.OAUTH.value and email_str:
             return "oauth", email_str
+        if kind == AuthKind.WELLKNOWN.value:
+            env_key = (
+                meta.get("env_key")
+                or meta.get("envKey")
+                or attrs.get("env_key")
+                or attrs.get("envKey")
+            )
+            if env_key:
+                return "wellknown", str(env_key)
+            return "wellknown", ""
         # fallback to api key-ish attribute names
         for key in ("api_key", "key", "token"):
-            if key in self.attributes and self.attributes[key]:
-                val = str(self.attributes[key])
+            if key in attrs and attrs[key]:
+                val = str(attrs[key])
                 if len(val) > 6:
                     obf = f"{val[:3]}***{val[-2:]}"
                 else:
                     obf = "***"
-                return "api_key", obf
+                return "api", obf
         return "", ""
+
+    def resolve_secret(self) -> Optional[str]:
+        """
+        Resolve the bearer/API secret for this auth record without logging it.
+        """
+        meta = self.metadata or {}
+        attrs = self.attributes or {}
+        kind = (
+            self.kind.value
+            if isinstance(self.kind, AuthKind)
+            else str(self.kind or AuthKind.OAUTH.value)
+        ).lower()
+        if kind == AuthKind.OAUTH.value:
+            return meta.get("access_token") or meta.get("token")
+        if kind == AuthKind.API.value:
+            return (
+                meta.get("api_key")
+                or meta.get("key")
+                or meta.get("token")
+                or attrs.get("api_key")
+                or attrs.get("key")
+                or attrs.get("token")
+            )
+        if kind == AuthKind.WELLKNOWN.value:
+            token = (
+                meta.get("token")
+                or meta.get("api_key")
+                or meta.get("access_token")
+                or attrs.get("token")
+                or attrs.get("api_key")
+                or attrs.get("access_token")
+            )
+            if token:
+                return str(token)
+            env_key = (
+                meta.get("env_key")
+                or meta.get("envKey")
+                or attrs.get("env_key")
+                or attrs.get("envKey")
+            )
+            if env_key:
+                return os.getenv(str(env_key).strip())
+        return None
 
     def transport_overrides(self) -> Dict[str, str]:
         """

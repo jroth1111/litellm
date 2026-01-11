@@ -12,6 +12,7 @@ sys.path.insert(
 
 import httpx
 import pytest
+pytest.importorskip("respx")
 from respx import MockRouter
 
 import litellm

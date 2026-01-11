@@ -1,4 +1,3 @@
-import json
 from typing import Optional
 from urllib.parse import urlencode, urlparse, urlunparse
 
@@ -13,114 +12,17 @@ from litellm.proxy.common_utils.encrypt_decrypt_utils import (
     decrypt_value_helper,
     encrypt_value_helper,
 )
+from litellm.auth.oauth_callback import (
+    decode_state_payload,
+    encode_state_payload,
+    get_request_base_url,
+)
 from litellm.proxy.common_utils.http_parsing_utils import _read_request_body
 from litellm.types.mcp_server.mcp_server_manager import MCPServer
 
 router = APIRouter(
     tags=["mcp"],
 )
-
-
-def get_request_base_url(request: Request) -> str:
-    """
-    Get the base URL for the request, considering X-Forwarded-* headers.
-
-    When behind a proxy (like nginx), the proxy may set:
-    - X-Forwarded-Proto: The original protocol (http/https)
-    - X-Forwarded-Host: The original host (may include port)
-    - X-Forwarded-Port: The original port (if not in Host header)
-
-    Args:
-        request: FastAPI Request object
-
-    Returns:
-        The reconstructed base URL (e.g., "https://proxy.example.com")
-    """
-    base_url = str(request.base_url).rstrip("/")
-    parsed = urlparse(base_url)
-
-    # Get forwarded headers
-    x_forwarded_proto = request.headers.get("X-Forwarded-Proto")
-    x_forwarded_host = request.headers.get("X-Forwarded-Host")
-    x_forwarded_port = request.headers.get("X-Forwarded-Port")
-
-    # Start with the original scheme
-    scheme = x_forwarded_proto if x_forwarded_proto else parsed.scheme
-
-    # Handle host and port
-    if x_forwarded_host:
-        # X-Forwarded-Host may already include port (e.g., "example.com:8080")
-        if ":" in x_forwarded_host and not x_forwarded_host.startswith("["):
-            # Host includes port
-            netloc = x_forwarded_host
-        elif x_forwarded_port:
-            # Port is separate
-            netloc = f"{x_forwarded_host}:{x_forwarded_port}"
-        else:
-            # Just host, no explicit port
-            netloc = x_forwarded_host
-    else:
-        # No X-Forwarded-Host, use original netloc
-        netloc = parsed.netloc
-        if x_forwarded_port and ":" not in netloc:
-            # Add forwarded port if not already in netloc
-            netloc = f"{netloc}:{x_forwarded_port}"
-
-    # Reconstruct the URL
-    return urlunparse((scheme, netloc, parsed.path, "", "", ""))
-
-
-def encode_state_with_base_url(
-    base_url: str,
-    original_state: str,
-    code_challenge: Optional[str] = None,
-    code_challenge_method: Optional[str] = None,
-    client_redirect_uri: Optional[str] = None,
-) -> str:
-    """
-    Encode the base_url, original state, and PKCE parameters using encryption.
-
-    Args:
-        base_url: The base URL to encode
-        original_state: The original state parameter
-        code_challenge: PKCE code challenge from client
-        code_challenge_method: PKCE code challenge method from client
-        client_redirect_uri: Original redirect_uri from client
-
-    Returns:
-        An encrypted string that encodes all values
-    """
-    state_data = {
-        "base_url": base_url,
-        "original_state": original_state,
-        "code_challenge": code_challenge,
-        "code_challenge_method": code_challenge_method,
-        "client_redirect_uri": client_redirect_uri,
-    }
-    state_json = json.dumps(state_data, sort_keys=True)
-    encrypted_state = encrypt_value_helper(state_json)
-    return encrypted_state
-
-
-def decode_state_hash(encrypted_state: str) -> dict:
-    """
-    Decode an encrypted state to retrieve all OAuth session data.
-
-    Args:
-        encrypted_state: The encrypted string to decode
-
-    Returns:
-        A dict containing base_url, original_state, and optional PKCE parameters
-
-    Raises:
-        Exception: If decryption fails or data is malformed
-    """
-    decrypted_json = decrypt_value_helper(encrypted_state, "oauth_state")
-    if decrypted_json is None:
-        raise ValueError("Failed to decrypt state parameter")
-
-    state_data = json.loads(decrypted_json)
-    return state_data
 
 
 async def authorize_with_server(
@@ -144,9 +46,10 @@ async def authorize_with_server(
     parsed = urlparse(redirect_uri)
     base_url = urlunparse(parsed._replace(query=""))
     request_base_url = get_request_base_url(request)
-    encoded_state = encode_state_with_base_url(
+    encoded_state = encode_state_payload(
         base_url=base_url,
         original_state=state,
+        encrypt=encrypt_value_helper,
         code_challenge=code_challenge,
         code_challenge_method=code_challenge_method,
         client_redirect_uri=redirect_uri,
@@ -406,7 +309,10 @@ async def token_endpoint(
 async def callback(code: str, state: str):
     try:
         # Decode the state hash to get base_url, original state, and PKCE params
-        state_data = decode_state_hash(state)
+        state_data = decode_state_payload(
+            encrypted_state=state,
+            decrypt=lambda value: decrypt_value_helper(value, "oauth_state"),
+        )
         base_url = state_data["base_url"]
         original_state = state_data["original_state"]
 

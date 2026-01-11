@@ -1,4 +1,5 @@
 import copy
+import importlib.util
 import logging
 import sys
 import time
@@ -38,6 +39,8 @@ from litellm.utils import (
     validate_environment,
 )
 from unittest.mock import AsyncMock, MagicMock, patch
+
+LANGFUSE_AVAILABLE = importlib.util.find_spec("langfuse") is not None
 
 
 # Assuming your trim_messages, shorten_message_to_fit_limit, and get_token_count functions are all in a module named 'message_utils'
@@ -371,6 +374,10 @@ def test_get_valid_models_with_custom_llm_provider(custom_llm_provider):
         provider=LlmProviders(custom_llm_provider),
     )
     assert provider_config is not None
+    if custom_llm_provider == "anthropic" and not os.getenv("ANTHROPIC_API_KEY"):
+        pytest.skip("ANTHROPIC_API_KEY not set")
+    if custom_llm_provider == "xai" and not os.getenv("XAI_API_KEY"):
+        pytest.skip("XAI_API_KEY not set")
     valid_models = get_valid_models(
         check_provider_endpoint=True, custom_llm_provider=custom_llm_provider
     )
@@ -390,6 +397,8 @@ def test_bad_key():
 
 
 def test_good_key():
+    if "OPENAI_API_KEY" not in os.environ:
+        pytest.skip("OPENAI_API_KEY not set")
     key = os.environ["OPENAI_API_KEY"]
     response = check_valid_key(model="gpt-3.5-turbo", api_key=key)
     assert response == True
@@ -447,6 +456,7 @@ def test_validate_environment_ollama_failed():
 
 
 def test_function_to_dict():
+    pytest.importorskip("numpydoc")
     print("testing function to dict for get current weather")
 
     def get_current_weather(location: str, unit: str):
@@ -920,6 +930,7 @@ def test_get_llm_provider_ft_models():
     assert custom_llm_provider == "openai"
 
 
+@pytest.mark.skipif(not LANGFUSE_AVAILABLE, reason="langfuse not installed")
 @pytest.mark.parametrize("langfuse_trace_id", [None, "my-unique-trace-id"])
 @pytest.mark.parametrize(
     "langfuse_existing_trace_id", [None, "my-unique-existing-trace-id"]
@@ -1753,6 +1764,8 @@ def test_get_num_retries(num_retries):
 
 
 def test_add_custom_logger_callback_to_specific_event(monkeypatch):
+    if not LANGFUSE_AVAILABLE:
+        pytest.skip("langfuse not installed")
     from litellm.utils import _add_custom_logger_callback_to_specific_event
 
     monkeypatch.setattr(litellm, "success_callback", [])
@@ -1861,6 +1874,7 @@ def test_custom_logger_exists_in_callbacks_individual_functions(monkeypatch):
     assert _custom_logger_class_exists_in_failure_callbacks(mock_logger_2) == True
 
 
+@pytest.mark.skipif(not LANGFUSE_AVAILABLE, reason="langfuse not installed")
 @pytest.mark.asyncio
 async def test_add_custom_logger_callback_to_specific_event_with_duplicates(
     monkeypatch,
@@ -1901,6 +1915,7 @@ async def test_add_custom_logger_callback_to_specific_event_with_duplicates(
     assert len(litellm._async_success_callback) == initial_async_success_callback_len
 
 
+@pytest.mark.skipif(not LANGFUSE_AVAILABLE, reason="langfuse not installed")
 @pytest.mark.asyncio
 async def test_add_custom_logger_callback_to_specific_event_with_duplicates_success_callback(
     monkeypatch,
@@ -1940,6 +1955,7 @@ async def test_add_custom_logger_callback_to_specific_event_with_duplicates_succ
     assert len(litellm._async_success_callback) == initial_async_success_callback_len
 
 
+@pytest.mark.skipif(not LANGFUSE_AVAILABLE, reason="langfuse not installed")
 @pytest.mark.asyncio
 async def test_add_custom_logger_callback_to_specific_event_with_duplicates_callbacks(
     monkeypatch,
@@ -2339,7 +2355,10 @@ def test_get_valid_models_from_dynamic_api_key():
     )
     assert len(valid_models) == 0
 
-    creds = CredentialLiteLLMParams(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not anthropic_api_key:
+        pytest.skip("ANTHROPIC_API_KEY not set")
+    creds = CredentialLiteLLMParams(api_key=anthropic_api_key)
     valid_models = get_valid_models(
         custom_llm_provider="anthropic",
         litellm_params=creds,
@@ -2502,4 +2521,3 @@ def test_get_base_model_from_metadata():
     # Test 6: None input
     result = _get_base_model_from_metadata(None)
     assert result is None, f"Expected None for None input, got {result}"
-

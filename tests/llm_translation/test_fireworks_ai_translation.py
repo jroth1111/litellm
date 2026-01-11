@@ -106,6 +106,8 @@ class TestFireworksAIAudioTranscription(BaseLLMAudioTranscriptionTest):
 )
 def test_document_inlining_example(disable_add_transform_inline_image_block):
     litellm.set_verbose = True
+    if not os.getenv("FIREWORKS_API_KEY"):
+        pytest.skip("FIREWORKS_API_KEY not set")
     if disable_add_transform_inline_image_block is True:
         with pytest.raises(Exception):
             completion = litellm.completion(

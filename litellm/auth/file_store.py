@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-from .core import AuthRecord, AuthStatus, AuthStore, ModelState, QuotaState
+from .core import AuthKind, AuthRecord, AuthStatus, AuthStore, ModelState, QuotaState
 from .crypto import (
     AuthEncryptionError,
     build_encryptor,
@@ -174,6 +174,7 @@ def _serialize_auth(record: AuthRecord) -> Dict[str, Any]:
         "id": record.id,
         "provider": record.provider,
         "label": record.label,
+        "kind": record.kind.value if isinstance(record.kind, AuthKind) else str(record.kind),
         "attributes": record.attributes,
         "metadata": record.metadata,
         "status": record.status.value,
@@ -208,10 +209,16 @@ def _deserialize_auth(data: Dict[str, Any]) -> AuthRecord:
     model_states = {
         key: _deserialize_model_state(value) for key, value in model_states_raw.items()
     }
+    kind_raw = data.get("kind") or AuthKind.OAUTH.value
+    try:
+        kind = AuthKind(kind_raw)
+    except Exception:
+        kind = AuthKind.OAUTH
     return AuthRecord(
         id=data["id"],
         provider=data["provider"],
         label=data.get("label", ""),
+        kind=kind,
         attributes=data.get("attributes", {}) or {},
         metadata=data.get("metadata", {}) or {},
         status=AuthStatus(data.get("status", AuthStatus.ACTIVE)),

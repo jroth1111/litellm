@@ -14,7 +14,7 @@ class CliCallbackServerTests(unittest.TestCase):
         self.cli = cli_mod
 
     def test_ephemeral_port_redirect_uri_returns_actual_port(self):
-        httpd, thread, result, done, actual_redirect = self.cli._start_oauth_callback_server(  # type: ignore[attr-defined]
+        httpd, thread, result, done, actual_redirect = self.cli.start_local_callback_server(
             redirect_uri="http://127.0.0.1:0/callback",
             expected_state="s1",
         )
@@ -28,7 +28,7 @@ class CliCallbackServerTests(unittest.TestCase):
             thread.join(timeout=1)
 
     def test_state_mismatch_sets_error_and_unblocks(self):
-        httpd, thread, result, done, actual_redirect = self.cli._start_oauth_callback_server(  # type: ignore[attr-defined]
+        httpd, thread, result, done, actual_redirect = self.cli.start_local_callback_server(
             redirect_uri="http://127.0.0.1:0/callback",
             expected_state="expected",
         )
@@ -46,7 +46,7 @@ class CliCallbackServerTests(unittest.TestCase):
             thread.join(timeout=1)
 
     def test_missing_code_sets_error_and_unblocks(self):
-        httpd, thread, result, done, actual_redirect = self.cli._start_oauth_callback_server(  # type: ignore[attr-defined]
+        httpd, thread, result, done, actual_redirect = self.cli.start_local_callback_server(
             redirect_uri="http://127.0.0.1:0/callback",
             expected_state="expected",
         )
@@ -65,4 +65,3 @@ class CliCallbackServerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -35,6 +35,8 @@ def test_supports_system_message():
     """
     Check if litellm.completion(...,supports_system_message=False)
     """
+    if not os.getenv("OPENAI_API_KEY") and not litellm.api_key:
+        pytest.skip("OPENAI_API_KEY required for OpenAI completion call")
     messages = [
         ChatCompletionSystemMessageParam(role="system", content="Listen here!"),
         ChatCompletionUserMessageParam(role="user", content="Hello there!"),
@@ -671,6 +673,8 @@ def test_get_optional_params_num_retries():
     """
     Relevant issue - https://github.com/BerriAI/litellm/issues/5124
     """
+    if not os.getenv("OPENAI_API_KEY"):
+        pytest.skip("OPENAI_API_KEY not set")
     with patch(
         "litellm.main.get_optional_params",
         new=MagicMock(return_value={"max_retries": 0}),

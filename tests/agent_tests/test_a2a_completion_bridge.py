@@ -19,6 +19,7 @@ import pytest
 sys.path.insert(0, os.path.abspath("../.."))
 
 import litellm
+pytest.importorskip("a2a")
 from a2a.types import MessageSendParams, SendMessageRequest, SendStreamingMessageRequest
 
 
@@ -276,4 +277,3 @@ async def test_vertex_agent_engine_streaming():
     # # Basic assertions
     # assert len(chunks) > 0
     # assert len(full_content) > 0
-

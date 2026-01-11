@@ -22,6 +22,7 @@ from litellm.utils import (
     get_optional_params,
     ProviderConfigManager,
 )
+from litellm.litellm_core_utils.get_llm_provider_logic import get_llm_provider
 from litellm.main import stream_chunk_builder
 from typing import Union
 from litellm.types.utils import Usage, ModelResponse
@@ -61,6 +62,46 @@ def _usage_format_tests(usage: litellm.Usage):
         assert usage.prompt_tokens > usage.prompt_tokens_details.cached_tokens
 
 
+_PROVIDER_ENV_KEYS = {
+    "openai": ("OPENAI_API_KEY",),
+    "anthropic": ("ANTHROPIC_API_KEY",),
+    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    "groq": ("GROQ_API_KEY",),
+    "mistral": ("MISTRAL_API_KEY", "MISTRAL_AZURE_API_KEY"),
+    "together_ai": ("TOGETHERAI_API_KEY", "TOGETHER_API_KEY"),
+    "fireworks_ai": ("FIREWORKS_API_KEY",),
+    "huggingface": ("HUGGINGFACE_API_KEY",),
+    "xai": ("XAI_API_KEY",),
+    "deepseek": ("DEEPSEEK_API_KEY",),
+    "databricks": ("DATABRICKS_API_KEY",),
+    "azure": ("AZURE_API_KEY", "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_KEY"),
+    "azure_ai": ("AZURE_AI_API_KEY", "AZURE_API_KEY"),
+    "cohere": ("COHERE_API_KEY",),
+    "watsonx": ("WATSONX_API_KEY", "WATSONX_TOKEN", "WATSONX_ZENAPIKEY"),
+}
+
+
+def _env_has_any(keys: tuple[str, ...]) -> bool:
+    return any(os.getenv(key) for key in keys)
+
+
+def _resolve_api_key(value: str | None) -> str | None:
+    if not value:
+        return None
+    if value.startswith("os.environ/"):
+        env_key = value.split("/", 1)[1]
+        return os.getenv(env_key)
+    return value
+
+
+def _aws_credentials_present() -> bool:
+    if os.getenv("AWS_PROFILE"):
+        return True
+    if os.getenv("AWS_ACCESS_KEY_ID") and os.getenv("AWS_SECRET_ACCESS_KEY"):
+        return True
+    return False
+
+
 class BaseLLMChatTest(ABC):
     """
     Abstract base test class that enforces a common test across all test classes.
@@ -92,6 +133,45 @@ class BaseLLMChatTest(ABC):
             pytest.skip("Rate limit exceeded")
         except litellm.InternalServerError:
             pytest.skip("Model is overloaded")
+
+    @pytest.fixture(autouse=True)
+    def _skip_if_missing_credentials(self):
+        """
+        Skip network-backed provider tests when required credentials are absent.
+        """
+        try:
+            base_args = self.get_base_completion_call_args()
+        except AttributeError:
+            return
+        api_key = _resolve_api_key(base_args.get("api_key"))
+        if api_key:
+            return
+
+        model = base_args.get("model") or ""
+        custom_llm_provider = base_args.get("custom_llm_provider")
+        api_base = base_args.get("api_base")
+        raw_api_key = base_args.get("api_key")
+
+        _, provider, dynamic_api_key, _ = get_llm_provider(
+            model=model,
+            custom_llm_provider=custom_llm_provider,
+            api_base=api_base,
+            api_key=raw_api_key,
+        )
+
+        if dynamic_api_key:
+            return
+
+        if provider in _PROVIDER_ENV_KEYS and not _env_has_any(
+            _PROVIDER_ENV_KEYS[provider]
+        ):
+            pytest.skip(f"Missing credentials for provider '{provider}'")
+
+        if provider == "bedrock":
+            if not _aws_credentials_present() or not (
+                os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+            ):
+                pytest.skip("Missing AWS credentials/region for Bedrock")
 
     def test_developer_role_translation(self):
         """

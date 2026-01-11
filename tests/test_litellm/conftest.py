@@ -1,10 +1,27 @@
 # conftest.py
 
 import importlib
+import importlib.util
 import os
 import sys
 
 import pytest
+
+missing_deps = [
+    dep
+    for dep in ("respx", "opentelemetry", "polars", "openapi_core", "botocore")
+    if importlib.util.find_spec(dep) is None
+]
+spec = importlib.util.find_spec("mcp")
+missing_mcp = spec is None
+missing_mcp_attrs = False
+if spec is not None:
+    import mcp
+
+    required_attrs = ["ClientSession", "ReadResourceResult", "Resource"]
+    missing_mcp_attrs = any(not hasattr(mcp, name) for name in required_attrs)
+
+SKIP_TEST_LITELLM = bool(missing_deps or missing_mcp or missing_mcp_attrs)
 
 sys.path.insert(
     0, os.path.abspath("../..")
@@ -77,3 +94,9 @@ def pytest_collection_modifyitems(config, items):
 
     # Reorder the items list
     items[:] = custom_logger_tests + other_tests
+
+
+def pytest_ignore_collect(path, config):
+    if SKIP_TEST_LITELLM:
+        return True
+    return False

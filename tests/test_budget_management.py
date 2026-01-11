@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 import aiohttp
 import pytest
+pytest.importorskip("pytest_asyncio")
 import pytest_asyncio
 
 

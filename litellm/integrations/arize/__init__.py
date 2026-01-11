@@ -7,8 +7,6 @@ if TYPE_CHECKING:
 
 from litellm.types.prompts.init_prompts import SupportedPromptIntegrations
 
-from .arize_phoenix_prompt_manager import ArizePhoenixPromptManager
-
 # Global instances
 global_arize_config: Optional[dict] = None
 
@@ -30,21 +28,18 @@ def prompt_initializer(
             "api_key and api_base are required for Arize Phoenix prompt integration"
         )
 
-    try:
-        arize_prompt_manager = ArizePhoenixPromptManager(
-            **{
-                "api_key": api_key,
-                "api_base": api_base,
-                "prompt_id": prompt_id,
-                **litellm_params.model_dump(
-                    exclude={"api_key", "api_base", "prompt_id"}
-                ),
-            },
-        )
+    from .arize_phoenix_prompt_manager import ArizePhoenixPromptManager
 
-        return arize_prompt_manager
-    except Exception as e:
-        raise e
+    arize_prompt_manager = ArizePhoenixPromptManager(
+        **{
+            "api_key": api_key,
+            "api_base": api_base,
+            "prompt_id": prompt_id,
+            **litellm_params.model_dump(exclude={"api_key", "api_base", "prompt_id"}),
+        },
+    )
+
+    return arize_prompt_manager
 
 
 prompt_initializer_registry = {

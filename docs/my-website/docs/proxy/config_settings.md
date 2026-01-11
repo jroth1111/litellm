@@ -215,6 +215,8 @@ router_settings:
 | max_parallel_requests | integer | The max parallel requests allowed per deployment |
 | global_max_parallel_requests | integer | The max parallel requests allowed on the proxy overall |
 | infer_model_from_keys | boolean | If true, infers the model from the provided keys |
+| include_discovered_models | boolean | If true, /v1/models includes subscription OAuth model discovery results. |
+| auth_model_discovery_interval_seconds | int | Interval in seconds for refreshing subscription OAuth model discovery when enabled. Default is 900. |
 | background_health_checks | boolean | If true, enables background health checks. [Doc on health checks](health) |
 | health_check_interval | integer | The interval for health checks in seconds [Doc on health checks](health) |
 | alerting | array of strings | List of alerting methods [Doc on Slack Alerting](alerting) |
@@ -265,6 +267,19 @@ router_settings:
 | forward_client_headers_to_llm_api | boolean | If true, forwards the client headers (any `x-` headers and `anthropic-beta` headers) to the backend LLM call |
 | maximum_spend_logs_retention_period               | str                   | Used to set the max retention time for spend logs in the db, after which they will be auto-purged                                                                                                                                                                                                                             |
 | maximum_spend_logs_retention_interval | str | Used to set the interval in which the spend log cleanup task should run in.                                                                                                                                                                                                                                                   |
+| custom_ui_sso_sign_in_handler | str | Path to a custom UI SSO sign-in handler class or function. |
+| database_connection_pool_timeout | int | Database connection pool timeout in seconds. |
+| disable_error_logs | boolean | If true, disables error logging for proxy requests. |
+| enforce_rbac | boolean | If true, enforces RBAC for JWT-based auth (token must map to admin/user/team). |
+| litellm_settings | dict | Nested LiteLLM SDK settings block under general settings. |
+| mcp_client_side_auth_header_name | str | Header name for MCP client-side auth; prefer `LITELLM_MCP_CLIENT_SIDE_AUTH_HEADER_NAME`. |
+| role_permissions | List[Dict[str, Any]] | RBAC role permissions configuration. |
+| token_rate_limit_type | Literal["input","output","total"] | Token rate limiting mode for parallel request limiter. |
+| use_canonical_router | boolean | If true, enable canonical routing for supported endpoints. |
+| use_redis_transaction_buffer | boolean | If true, buffer spend log updates via Redis before DB writes. |
+| use_shared_health_check | boolean | If true, share health check status across instances via Redis. |
+| user_header_mappings | List[Dict[str, Any]] | Mapping of headers to end-user IDs. |
+| user_header_name | str | Deprecated header name for end-user ID; prefer `user_header_mappings`. |
 ### router_settings - Reference
 
 :::info
@@ -347,9 +362,43 @@ router_settings:
 | ignore_invalid_deployments | boolean | If true, ignores invalid deployments. Default for proxy is True - to prevent invalid models from blocking other models from being loaded. |
 | search_tools | List[SearchToolTypedDict] | List of search tool configurations for Search API integration. Each tool specifies a search_tool_name and litellm_params with search_provider, api_key, api_base, etc. [Further Docs](../search.md) |
 | guardrail_list | List[GuardrailTypedDict] | List of guardrail configurations for guardrail load balancing. Enables load balancing across multiple guardrail deployments with the same guardrail_name. [Further Docs](./guardrails/guardrail_load_balancing.md) |
+| auth_selector | CredentialSelector | [SDK-only] Custom selector for subscription OAuth credentials. |
+| auth_store | AuthStore | Auth record storage backend for subscription OAuth. |
+| auth_namespace | string | Namespace used for auth record storage. |
+| auth_model_alias_map | dict | Mapping of logical model aliases to provider-specific model IDs for subscription auth. |
+| auth_strategies | dict | Provider name to AuthStrategy mapping for subscription OAuth. |
+| auth_allow_cross_provider_fallback | boolean | Allow alias-based cross-provider auth fallback. |
+| auth_preferred_providers | list[string] | Preferred provider order when selecting credentials. |
+| auth_team_overrides | dict | Team-specific auth overrides (preferred_providers, allow_cross_provider). |
+| auth_metrics | AuthMetrics | Metrics sink for subscription auth calls/errors. |
+| auth_hooks | AuthHooks | Hooks for auth lifecycle events (register, success, failure, update). |
+| auth_records_cache_ttl_seconds | float | TTL for in-memory auth record cache when loading from store. |
+| auth_rotate_on_status_codes | list[int] | Status codes that trigger same-request auth rotation. |
+| auth_max_attempts_per_request | Optional[int] | Max auth attempts per request when rotating credentials. |
+| auth_cooldown_overrides | dict | Override cooldown durations for auth failures (e.g., rate_limit, auth_error, server_error). |
+| auth_streaming_prefetch_first_chunk | boolean | Prefetch the first streaming chunk to validate auth before returning. |
+| auth_subscription_rpm_backend | string | Backend for subscription RPM tracking: "auto", "redis", or "disabled". |
 
 
 ### environment variables - Reference
+
+<!-- env-key-map: | _ | ANTHROPIC_CLIENT_ID | _ | _ | ANTHROPIC_COOKIE_REDIRECT_URI | _ | _ | ANTHROPIC_REDIRECT_URI | _ | _ | ANTHROPIC_TOKEN_URL | _ | _ | ANTIGRAVITY_API_BASE | _ | _ | ANTIGRAVITY_AUTH_URL | _ | _ | ANTIGRAVITY_CLIENT_ID | _ | _ | ANTIGRAVITY_REDIRECT_URI | _ | _ | ANTIGRAVITY_TOKEN_URL | _ | _ | ANTIGRAVITY_USER_AGENT | _ | _ | CLAUDE_API_BASE | _ | _ | COPILOT_DEVICE_CODE_URL | _ | _ | COPILOT_POLL_INTERVAL | _ | _ | COPILOT_TOKEN_URL | _ | _ | CURSOR_API_BASE | _ | _ | CURSOR_AUTHENTICATOR_URL | _ | _ | CURSOR_POLL_URL | _ | _ | GEMINI_AUTHORIZE_URL | _ | _ | GEMINI_CLIENT_SECRET | _ | _ | GEMINI_SCOPES | _ | _ | GEMINI_USERINFO_URL | _ | _ | GOOGLE_AI_STUDIO_API_BASE | _ | _ | LITELLM_AUTH_ENCRYPTION_KEY | _ | _ | LITELLM_OAUTH_POOL_SIZE | _ | _ | LITELLM_USE_CANONICAL_ROUTER | _ | _ | OPENAI_CLIENT_ID | _ | _ | OPENAI_JWKS_URL | _ | _ | OPENAI_SCOPES | _ | _ | QWEN_API_BASE | _ | _ | QWEN_CLIENT_ID | _ | _ | QWEN_RESOURCE_URL | _ | _ | QWEN_TOKEN_ENDPOINT | _ -->
+<!-- env-key: | ANTHROPIC_CLIENT_ID | -->
+<!-- env-key: | ANTHROPIC_REDIRECT_URI | -->
+<!-- env-key: | ANTIGRAVITY_API_BASE | -->
+<!-- env-key: | ANTIGRAVITY_CLIENT_ID | -->
+<!-- env-key: | ANTIGRAVITY_TOKEN_URL | -->
+<!-- env-key: | CLAUDE_API_BASE | -->
+<!-- env-key: | COPILOT_POLL_INTERVAL | -->
+<!-- env-key: | CURSOR_API_BASE | -->
+<!-- env-key: | CURSOR_POLL_URL | -->
+<!-- env-key: | GEMINI_CLIENT_SECRET | -->
+<!-- env-key: | GEMINI_USERINFO_URL | -->
+<!-- env-key: | LITELLM_AUTH_ENCRYPTION_KEY | -->
+<!-- env-key: | LITELLM_USE_CANONICAL_ROUTER | -->
+<!-- env-key: | OPENAI_JWKS_URL | -->
+<!-- env-key: | QWEN_API_BASE | -->
+<!-- env-key: | QWEN_RESOURCE_URL | -->
 
 | Name | Description |
 |------|-------------|
@@ -889,3 +938,68 @@ router_settings:
 | ZSCALER_AI_GUARD_API_KEY | API key for Zscaler AI Guard service
 | ZSCALER_AI_GUARD_POLICY_ID | Policy ID for Zscaler AI Guard guardrails
 | ZSCALER_AI_GUARD_URL | Base URL for Zscaler AI Guard API. Default is https://api.us1.zseclipse.net/v1/detection/execute-policy
+| ANTHROPIC_AUTH_URL | OAuth authorization URL for Anthropic auth flows |
+| ANTHROPIC_CLIENT_ID | OAuth client ID for Anthropic auth flows |
+| ANTHROPIC_COOKIE_CLIENT_ID | Cookie-based Anthropic auth client ID |
+| ANTHROPIC_COOKIE_REDIRECT_URI | Cookie-based Anthropic auth redirect URI |
+| ANTHROPIC_COOKIE_SCOPES | Cookie-based Anthropic auth scopes |
+| ANTHROPIC_REDIRECT_URI | OAuth redirect URI for Anthropic auth flows |
+| ANTHROPIC_SCOPES | OAuth scopes for Anthropic auth flows |
+| ANTHROPIC_TOKEN_URL | OAuth token URL for Anthropic auth flows |
+| ANTHROPIC_VERSION | Anthropic API version override for request headers |
+| ANTIGRAVITY_API_BASE | Base URL for Antigravity API requests |
+| ANTIGRAVITY_API_VERSION | API version for Antigravity requests |
+| ANTIGRAVITY_AUTH_URL | OAuth authorization URL for Antigravity auth flows |
+| ANTIGRAVITY_CALLBACK_PORT | Local callback port for Antigravity OAuth |
+| ANTIGRAVITY_CLIENT_ID | OAuth client ID for Antigravity auth flows |
+| ANTIGRAVITY_CLIENT_SECRET | OAuth client secret for Antigravity auth flows |
+| ANTIGRAVITY_REDIRECT_URI | OAuth redirect URI for Antigravity auth flows |
+| ANTIGRAVITY_SCOPES | OAuth scopes for Antigravity auth flows |
+| ANTIGRAVITY_TOKEN_URL | OAuth token URL for Antigravity auth flows |
+| ANTIGRAVITY_USERINFO_URL | OAuth userinfo URL for Antigravity auth flows |
+| ANTIGRAVITY_USER_AGENT | User agent string for Antigravity requests |
+| ANTIGRAVITY_X_GOOG_API_CLIENT | x-goog-api-client header override for Antigravity |
+| CLAUDE_API_BASE | Base URL for Claude API requests |
+| COPILOT_CLIENT_ID | OAuth client ID for GitHub Copilot device flow |
+| COPILOT_DEVICE_CODE_URL | OAuth device code URL for GitHub Copilot |
+| COPILOT_MAX_POLL_DURATION | Max polling duration for Copilot device flow |
+| COPILOT_POLL_INTERVAL | Poll interval for Copilot device flow |
+| COPILOT_SCOPE | OAuth scopes for GitHub Copilot |
+| COPILOT_TOKEN_URL | OAuth token URL for GitHub Copilot |
+| COPILOT_USER_INFO_URL | OAuth user info URL for GitHub Copilot |
+| CURSOR_API_BASE | Base URL for Cursor API requests |
+| CURSOR_API_URL | API URL for Cursor auth requests |
+| CURSOR_AUTHENTICATOR_URL | Authenticator URL for Cursor auth flows |
+| CURSOR_LOGIN_URL | Login URL for Cursor auth flows |
+| CURSOR_POLL_URL | Device flow polling URL for Cursor auth flows |
+| CURSOR_REFRESH_URL | Refresh URL for Cursor auth flows |
+| GEMINI_AUTHORIZE_URL | OAuth authorization URL for Gemini |
+| GEMINI_CLIENT_ID | OAuth client ID for Gemini |
+| GEMINI_CLIENT_SECRET | OAuth client secret for Gemini |
+| GEMINI_REDIRECT_URI | OAuth redirect URI for Gemini |
+| GEMINI_SCOPES | OAuth scopes for Gemini |
+| GEMINI_TOKEN_URL | OAuth token URL for Gemini |
+| GEMINI_USERINFO_URL | OAuth userinfo URL for Gemini |
+| GITHUB_COPILOT_API_BASE | Base URL for GitHub Copilot API requests |
+| GOOGLE_AI_STUDIO_API_BASE | Base URL for Google AI Studio API requests |
+| LITELLM_AUTH_ADAPTERS | Comma-separated list of enabled subscription auth adapters |
+| LITELLM_AUTH_ENCRYPTION_KEY | Base64 encryption key for auth record storage |
+| LITELLM_OAUTH_DEBUG | Enable debug logging for OAuth flows |
+| LITELLM_OAUTH_POOL_SIZE | Connection pool size for OAuth HTTP client |
+| LITELLM_OAUTH_PROXY | Proxy URL for OAuth HTTP requests |
+| LITELLM_USE_CANONICAL_ROUTER | Enable canonical router for supported endpoints |
+| OPENAI_AUTH_URL | OAuth authorization URL for OpenAI |
+| OPENAI_CLIENT_ID | OAuth client ID for OpenAI |
+| OPENAI_EXPECTED_ISSUER | Expected issuer for OpenAI OAuth validation |
+| OPENAI_JWKS_URL | JWKS URL for OpenAI OAuth validation |
+| OPENAI_REDIRECT_URI | OAuth redirect URI for OpenAI |
+| OPENAI_SCOPES | OAuth scopes for OpenAI |
+| OPENAI_TOKEN_URL | OAuth token URL for OpenAI |
+| QWEN_API_BASE | Base URL for Qwen API requests |
+| QWEN_API_VERSION | API version for Qwen requests |
+| QWEN_CLIENT_ID | OAuth client ID for Qwen |
+| QWEN_DEVICE_CODE_ENDPOINT | Device code endpoint for Qwen OAuth |
+| QWEN_RESOURCE_URL | OAuth resource URL for Qwen |
+| QWEN_SCOPES | OAuth scopes for Qwen |
+| QWEN_TOKEN_ENDPOINT | OAuth token endpoint for Qwen |
+| XDG_CONFIG_HOME | Base config directory for OAuth credential storage |

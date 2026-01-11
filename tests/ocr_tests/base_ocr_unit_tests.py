@@ -7,6 +7,7 @@ import pytest
 import litellm
 import os
 from abc import ABC, abstractmethod
+from litellm.litellm_core_utils.get_llm_provider_logic import get_llm_provider
 
 
 # Test resources
@@ -48,6 +49,42 @@ class BaseOCRTest(ABC):
                 pytest.skip(f"URL rejected by provider - {error_msg}")
             else:
                 raise
+
+    @pytest.fixture(autouse=True)
+    def _skip_if_missing_credentials(self):
+        base_args = self.get_base_ocr_call_args()
+        api_key = base_args.get("api_key")
+        if api_key:
+            return
+
+        model = base_args.get("model") or ""
+        custom_llm_provider = base_args.get("custom_llm_provider")
+        api_base = base_args.get("api_base")
+
+        _, provider, dynamic_api_key, _ = get_llm_provider(
+            model=model,
+            custom_llm_provider=custom_llm_provider,
+            api_base=api_base,
+            api_key=api_key,
+        )
+
+        if dynamic_api_key:
+            return
+
+        if provider == "mistral" and not os.getenv("MISTRAL_API_KEY"):
+            pytest.skip("MISTRAL_API_KEY not set")
+        if provider == "azure_ai":
+            if not (os.getenv("AZURE_API_KEY") or os.getenv("AZURE_AI_API_KEY")):
+                pytest.skip("AZURE_API_KEY not set")
+            if not os.getenv("AZURE_API_BASE") and not api_base:
+                pytest.skip("AZURE_API_BASE not set")
+        if provider == "vertex_ai":
+            has_creds = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+            has_keypair = os.getenv("VERTEX_AI_PRIVATE_KEY") and os.getenv(
+                "VERTEX_AI_PRIVATE_KEY_ID"
+            )
+            if not (has_creds or has_keypair):
+                pytest.skip("Vertex AI credentials not set")
 
     @pytest.mark.parametrize("sync_mode", [True, False])
     @pytest.mark.asyncio
@@ -175,4 +212,3 @@ class BaseOCRTest(ABC):
             raise
         except Exception as e:
             pytest.fail(f"OCR response structure test failed: {str(e)}")
-

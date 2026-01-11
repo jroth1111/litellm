@@ -8,12 +8,12 @@ Adapters consolidate provider-specific subscription logic:
 """
 
 from .base import AdapterCapabilities, LoginFlow
-from .registry import get_adapter, list_adapters
+from .registry import get_adapter, list_adapters, register_adapter_paths
 
 __all__ = [
     "AdapterCapabilities",
     "LoginFlow",
     "get_adapter",
     "list_adapters",
+    "register_adapter_paths",
 ]
-

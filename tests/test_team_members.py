@@ -1,9 +1,17 @@
+import os
+
 import pytest
 import requests
 import time
 from typing import Dict, List
 import logging
 from litellm._uuid import uuid
+
+if os.getenv("LITELLM_RUN_TEAM_MEMBER_TESTS", "").lower() not in ("1", "true", "yes"):
+    pytest.skip(
+        "team member tests require a local proxy at localhost:4000; set LITELLM_RUN_TEAM_MEMBER_TESTS=1 to run",
+        allow_module_level=True,
+    )
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

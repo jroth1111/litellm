@@ -16,19 +16,37 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .adapters.registry import list_provider_descriptors
-from .core import AuthRecord, AuthStatus, AuthStore
+from .core import AuthKind, AuthRecord, AuthStatus, AuthStore, RequestContext
 
 
 class AuthInput(BaseModel):
     id: str
     provider: str
     label: Optional[str] = ""
+    kind: Optional[str] = None
     attributes: Dict[str, str] = Field(default_factory=dict)
     metadata: Dict[str, Any] = Field(default_factory=dict)
     account: Optional[str] = None
+
+    @field_validator("kind", mode="before")
+    @classmethod
+    def _validate_kind(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        if isinstance(v, AuthKind):
+            return v.value
+        value = str(v).strip().lower()
+        if value in ("api_key", "apikey"):
+            value = "api"
+        if value in ("well_known",):
+            value = "wellknown"
+        try:
+            return AuthKind(value).value
+        except Exception as e:
+            raise ValueError("kind must be one of: oauth, api, wellknown") from e
 
 
 class AuthUpdate(BaseModel):
@@ -57,20 +75,38 @@ def get_router(
             raise HTTPException(status_code=404, detail=f"auth {auth_id} not found")
         return rec
 
-    def _redact_metadata(meta: Dict[str, Any]) -> Dict[str, Any]:
+    def _strategies(request: Request) -> Dict[str, Any]:
+        strategies: Optional[Dict[str, Any]] = getattr(
+            request.app.state, "subscription_auth_strategies", None
+        )
+        if not strategies:
+            raise HTTPException(
+                status_code=503,
+                detail="subscription auth strategies not configured",
+            )
+        return strategies
+
+    _SECRET_KEYS = {
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "token",
+        "authorization",
+        "api_key",
+        "env_key",
+        "envKey",
+        "client_secret",
+        "clientSecret",
+    }
+
+    def _redact_secrets(values: Dict[str, Any]) -> Dict[str, Any]:
         """
         Never expose bearer tokens via the management API.
         """
-        if not meta:
+        if not values:
             return {}
-        redacted = dict(meta)
-        for key in (
-            "access_token",
-            "refresh_token",
-            "id_token",
-            "token",
-            "authorization",
-        ):
+        redacted = dict(values)
+        for key in _SECRET_KEYS:
             if key in redacted:
                 redacted[key] = "***"
         return redacted
@@ -80,8 +116,9 @@ def get_router(
             "id": rec.id,
             "provider": rec.provider,
             "label": rec.label,
-            "attributes": rec.attributes,
-            "metadata": _redact_metadata(rec.metadata),
+            "kind": rec.kind.value if isinstance(rec.kind, AuthKind) else str(rec.kind),
+            "attributes": _redact_secrets(rec.attributes),
+            "metadata": _redact_secrets(rec.metadata),
             "status": rec.status.value,
             "status_message": rec.status_message,
             "unavailable": rec.unavailable,
@@ -102,6 +139,7 @@ def get_router(
                 "id": rec.id,
                 "provider": rec.provider,
                 "label": rec.label,
+                "kind": rec.kind.value if isinstance(rec.kind, AuthKind) else str(rec.kind),
                 "account": rec.metadata.get("account") or rec.attributes.get("account"),
                 "status": rec.status.value,
                 "status_message": rec.status_message,
@@ -126,6 +164,7 @@ def get_router(
             id=payload.id,
             provider=payload.provider,
             label=payload.label or "",
+            kind=payload.kind or AuthKind.OAUTH.value,
             attributes=payload.attributes or {},
             metadata=payload.metadata or {},
             status=AuthStatus.ACTIVE,
@@ -158,6 +197,33 @@ def get_router(
         rec.updated_at = datetime.now(timezone.utc)
         store.save(namespace, rec)
         return _serialize_safe(rec)
+
+    @router.post("/records/{auth_id}/refresh")
+    @router.post("/{auth_id}/refresh")
+    def refresh_auth(auth_id: str, request: Request):
+        store, namespace = _store(request)
+        strategies = _strategies(request)
+        rec = _ensure(store.get(namespace, auth_id), auth_id)
+        strat = strategies.get(rec.provider)
+        if strat is None:
+            raise HTTPException(
+                status_code=400, detail=f"no strategy registered for {rec.provider}"
+            )
+        if not getattr(strat, "supports_refresh", True):
+            raise HTTPException(
+                status_code=400,
+                detail=f"provider '{rec.provider}' tokens are not refreshable",
+            )
+        if rec.kind != AuthKind.OAUTH:
+            raise HTTPException(
+                status_code=400, detail="only oauth credentials can be refreshed"
+            )
+        try:
+            refreshed = strat.refresh(rec, ctx=RequestContext(model=""))  # type: ignore[arg-type]
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        store.save(namespace, refreshed)
+        return _serialize_safe(refreshed)
 
     @router.get("/providers")
     def providers():

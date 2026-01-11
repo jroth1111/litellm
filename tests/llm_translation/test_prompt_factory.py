@@ -778,9 +778,12 @@ def test_ensure_alternating_roles(
     assert messages == expected_messages
 
 
-def test_alternating_roles_e2e():
+def test_alternating_roles_e2e(monkeypatch):
     from litellm.llms.custom_httpx.http_handler import HTTPHandler
     import json
+
+    monkeypatch.setenv("DATABRICKS_API_BASE", "https://example.com")
+    monkeypatch.setenv("DATABRICKS_API_KEY", "test-key")
 
     litellm.set_verbose = True
     http_handler = HTTPHandler()

@@ -46,6 +46,8 @@ import litellm
 async def test_audio_speech_litellm(sync_mode, model, api_base, api_key):
     litellm._turn_on_debug()
     speech_file_path = Path(__file__).parent / "speech.mp3"
+    if not api_key:
+        pytest.skip("API key not set for audio speech test")
 
     if sync_mode:
         response = litellm.speech(
@@ -319,6 +321,8 @@ def test_audio_speech_cost_calc():
 
 
 def test_audio_speech_gemini():
+    if not os.getenv("GEMINI_API_KEY"):
+        pytest.skip("GEMINI_API_KEY not set")
     result = litellm.speech(
         model="gemini/gemini-2.5-flash-preview-tts",
         input="the quick brown fox jumped over the lazy dogs",
@@ -337,6 +341,8 @@ async def test_azure_ava_tts_async():
     litellm._turn_on_debug()
     api_key = os.getenv("AZURE_TTS_API_KEY")
     api_base = os.getenv("AZURE_TTS_API_BASE")
+    if not api_key or not api_base:
+        pytest.skip("AZURE_TTS_API_KEY/AZURE_TTS_API_BASE not set")
     
 
     speech_file_path = Path(__file__).parent / "azure_speech.mp3"

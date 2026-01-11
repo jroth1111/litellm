@@ -68,6 +68,7 @@ class TestCopilotDeviceFlow(unittest.TestCase):
     def test_request_device_code_with_mock(self):
         """Test device code request with mocked response."""
         from litellm.llms.github_copilot.oauth_subscription import request_device_code
+        from litellm.auth.provider_http import close_client_pool
 
         mock_response = {
             "device_code": "test-device-code",
@@ -91,9 +92,11 @@ class TestCopilotDeviceFlow(unittest.TestCase):
 
         httpx.Client = fake_client
         try:
+            close_client_pool()
             result = request_device_code()
         finally:
             httpx.Client = orig_client
+            close_client_pool()
 
         self.assertEqual(result.device_code, "test-device-code")
         self.assertEqual(result.user_code, "TEST-1234")

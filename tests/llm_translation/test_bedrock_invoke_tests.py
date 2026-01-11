@@ -87,6 +87,7 @@ def test_nova_invoke_streaming_chunk_parsing():
     Test that the AWSEventStreamDecoder correctly handles Nova's /bedrock/invoke/ streaming format
     where content is nested under 'contentBlockDelta'.
     """
+    pytest.importorskip("botocore")
     from litellm.llms.bedrock.chat.invoke_handler import AWSEventStreamDecoder
 
     # Initialize the decoder with a Nova model

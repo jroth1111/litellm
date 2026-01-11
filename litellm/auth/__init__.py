@@ -6,6 +6,7 @@ and stores live in provider-specific modules.
 """
 
 from .core import (
+    AuthKind,
     AuthRecord,
     AuthStatus,
     AuthStore,
@@ -61,6 +62,7 @@ from .management import (
 
 __all__ = [
     "AuthRecord",
+    "AuthKind",
     "AuthStatus",
     "AuthStore",
     "AuthStrategy",

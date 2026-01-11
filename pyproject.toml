@@ -181,6 +181,7 @@ addopts = ["--import-mode=importlib"]
 pythonpath = [
     ".",
     "tests",
+    "tests/batches_tests",
     "tests/unified_google_tests",
     "tests/llm_responses_api_testing",
     "tests/vector_store_tests",
@@ -192,6 +193,8 @@ pythonpath = [
     "tests/local_testing",
     "tests/logging_callback_tests",
     "tests/router_unit_tests",
+    "enterprise",
+    "litellm-proxy-extras",
 ]
 markers = [
     "asyncio: mark test as an asyncio test",

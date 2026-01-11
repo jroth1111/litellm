@@ -3,6 +3,7 @@ import os
 import sys
 import traceback
 import tracemalloc
+import importlib.util
 
 from dotenv import load_dotenv
 
@@ -14,7 +15,18 @@ sys.path.insert(
     0, os.path.abspath("../..")
 )  # Adds the parent directory to the system path
 
+missing_deps = [
+    dep
+    for dep in ("psutil", "apscheduler", "fastapi")
+    if importlib.util.find_spec(dep) is None
+]
+if missing_deps:
+    import pytest
 
+    pytest.skip(
+        f"memory load tests require dependencies: {', '.join(missing_deps)}",
+        allow_module_level=True,
+    )
 import litellm.types
 import litellm.types.utils
 from litellm.router import Router

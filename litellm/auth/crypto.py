@@ -2,10 +2,10 @@
 Authenticated encryption helpers for persisting OAuth subscription tokens.
 
 Design goals:
-- No new mandatory dependencies: prefer `cryptography` when present, fall back to
-  `pynacl` when present, otherwise fail loudly.
-- Secure key derivation using PBKDF2-HMAC-SHA256 (OWASP 2023 recommendations).
+- AES-256-GCM encryption with per-record nonces.
+- Base64-encoded 32-byte key requirement (validated).
 - Self-describing on-disk wrapper so we can change algorithms later.
+- Backward-compatible decryption for legacy fernet/secretbox payloads.
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ from typing import Literal, Optional, Protocol
 __all__ = [
     "AuthEncryptionError",
     "resolve_auth_encryption_secret",
+    "generate_auth_encryption_key",
+    "validate_auth_encryption_key",
     "build_encryptor",
     "encrypt_bytes",
     "decrypt_bytes",
@@ -28,10 +30,12 @@ __all__ = [
 
 _logger = logging.getLogger(__name__)
 
-# PBKDF2 parameters per OWASP 2023 recommendations
+# PBKDF2 parameters per OWASP 2023 recommendations (legacy fallback only)
 # https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html
 _KDF_ITERATIONS = 600_000
 _KDF_SALT = b"litellm-auth-v2"  # Static salt for deterministic derivation
+
+_AESGCM_NONCE_BYTES = 12
 
 
 class AuthEncryptionError(RuntimeError):
@@ -48,16 +52,16 @@ def resolve_auth_encryption_secret(explicit: Optional[str] = None) -> str:
     3) LITELLM_MASTER_KEY
     """
     if explicit:
-        return explicit
+        return validate_auth_encryption_key(explicit)
     env = os.getenv("LITELLM_AUTH_ENCRYPTION_KEY")
     if env:
-        return env
+        return validate_auth_encryption_key(env)
     env = os.getenv("LITELLM_MASTER_KEY")
     if env:
-        return env
+        return validate_auth_encryption_key(env)
     raise AuthEncryptionError(
-        "Missing auth encryption secret. Set `LITELLM_AUTH_ENCRYPTION_KEY` (preferred) "
-        "or `LITELLM_MASTER_KEY`."
+        "Missing auth encryption secret. Set `LITELLM_AUTH_ENCRYPTION_KEY` (base64 32-byte key, preferred) "
+        "or `LITELLM_MASTER_KEY`. Generate one with `litellm auth key init`."
     )
 
 
@@ -75,6 +79,40 @@ def _derive_key_bytes(secret: str) -> bytes:
         _KDF_ITERATIONS,
         dklen=32,
     )
+
+
+def _normalize_b64(value: str) -> str:
+    cleaned = (value or "").strip()
+    missing = len(cleaned) % 4
+    if missing:
+        cleaned += "=" * (4 - missing)
+    return cleaned
+
+
+def _decode_base64_key(secret: str) -> bytes:
+    try:
+        decoded = base64.urlsafe_b64decode(_normalize_b64(secret).encode("utf-8"))
+    except Exception as e:
+        raise AuthEncryptionError(
+            "Invalid auth encryption key. Expected base64-encoded 32-byte key."
+        ) from e
+    if len(decoded) != 32:
+        raise AuthEncryptionError(
+            "Invalid auth encryption key length. Expected base64-encoded 32-byte key."
+        )
+    return decoded
+
+
+def validate_auth_encryption_key(secret: str) -> str:
+    _decode_base64_key(secret)
+    return secret.strip()
+
+
+def generate_auth_encryption_key() -> str:
+    """
+    Generate a base64-encoded 32-byte key suitable for AES-256-GCM.
+    """
+    return base64.urlsafe_b64encode(os.urandom(32)).decode("utf-8").rstrip("=")
 
 
 class _Encryptor(Protocol):
@@ -107,6 +145,34 @@ def _build_fernet_encryptor(secret: str) -> _Encryptor:
     return _FernetEncryptor()
 
 
+def _build_aesgcm_encryptor(secret: str) -> _Encryptor:
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    except Exception as e:  # pragma: no cover
+        raise AuthEncryptionError(
+            "cryptography is required for AES-GCM encryption but is not available"
+        ) from e
+
+    key = _decode_base64_key(secret)
+    aesgcm = AESGCM(key)
+
+    class _AesGcmEncryptor:
+        alg = "aesgcm"
+
+        def encrypt(self, plaintext: bytes) -> bytes:
+            nonce = os.urandom(_AESGCM_NONCE_BYTES)
+            return nonce + aesgcm.encrypt(nonce, plaintext, None)
+
+        def decrypt(self, ciphertext: bytes) -> bytes:
+            if len(ciphertext) < _AESGCM_NONCE_BYTES:
+                raise AuthEncryptionError("Invalid AES-GCM payload")
+            nonce = ciphertext[:_AESGCM_NONCE_BYTES]
+            body = ciphertext[_AESGCM_NONCE_BYTES:]
+            return aesgcm.decrypt(nonce, body, None)
+
+    return _AesGcmEncryptor()
+
+
 def _build_secretbox_encryptor(secret: str) -> _Encryptor:
     try:
         from nacl.secret import SecretBox
@@ -134,21 +200,19 @@ def _build_secretbox_encryptor(secret: str) -> _Encryptor:
 
 def build_encryptor(
     secret: str,
-    preferred: Optional[Literal["fernet", "secretbox"]] = None,
+    preferred: Optional[Literal["aesgcm", "fernet", "secretbox"]] = None,
 ) -> _Encryptor:
     """
     Choose an encryptor implementation based on availability and preference.
     """
+    if preferred == "aesgcm" or preferred is None:
+        return _build_aesgcm_encryptor(secret)
     if preferred == "fernet":
         return _build_fernet_encryptor(secret)
     if preferred == "secretbox":
         return _build_secretbox_encryptor(secret)
 
-    # Prefer Fernet when available.
-    try:
-        return _build_fernet_encryptor(secret)
-    except AuthEncryptionError:
-        return _build_secretbox_encryptor(secret)
+    return _build_aesgcm_encryptor(secret)
 
 
 @dataclass(frozen=True)
@@ -164,7 +228,7 @@ def encrypt_bytes(plaintext: bytes, *, encryptor: _Encryptor) -> bytes:
         ct = token.decode("utf-8")
     else:
         ct = base64.urlsafe_b64encode(token).decode("utf-8")
-    env = EncryptedEnvelope(v=1, alg=encryptor.alg, ct=ct)
+    env = EncryptedEnvelope(v=2, alg=encryptor.alg, ct=ct)
     return json.dumps(env.__dict__, ensure_ascii=False, separators=(",", ":")).encode(
         "utf-8"
     )
@@ -182,10 +246,12 @@ def decrypt_bytes(ciphertext: bytes, *, secret: str) -> bytes:
     ct = env.get("ct")
     if not alg or not isinstance(ct, str) or not ct:
         raise AuthEncryptionError("Invalid encrypted auth record: missing fields")
+    if alg not in ("aesgcm", "fernet", "secretbox"):
+        raise AuthEncryptionError(f"Unsupported auth encryption algorithm: {alg}")
 
     encryptor = build_encryptor(
-        secret, preferred=alg if alg in ("fernet", "secretbox") else None
-    )  # type: ignore[arg-type]
+        secret, preferred=alg if alg in ("aesgcm", "fernet", "secretbox") else None
+    )
     if encryptor.alg == "fernet":
         token = ct.encode("utf-8")
     else:

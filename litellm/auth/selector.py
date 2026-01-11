@@ -66,6 +66,21 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _priority_value(auth: AuthRecord) -> int:
+    for key in ("priority", "auth_priority"):
+        if key in auth.attributes:
+            try:
+                return int(auth.attributes[key])
+            except Exception:
+                return 0
+        if key in auth.metadata:
+            try:
+                return int(auth.metadata[key])
+            except Exception:
+                return 0
+    return 0
+
+
 def _model_provider(model: str) -> Optional[str]:
     """
     Extract provider prefix if model uses a namespaced form like "provider/model".
@@ -246,8 +261,16 @@ class CredentialSelector:
             refreshed = auth.last_refreshed_at or datetime.min.replace(
                 tzinfo=timezone.utc
             )
+            last_used = auth.last_request_at or datetime.min.replace(tzinfo=timezone.utc)
+            priority = _priority_value(auth)
             preferred_rank = preferred.index(auth.provider) if auth.provider in preferred else len(preferred)
-            return (preferred_rank, next_retry, -int(refreshed.timestamp()))
+            return (
+                preferred_rank,
+                priority,
+                next_retry,
+                last_used,
+                -int(refreshed.timestamp()),
+            )
 
         # group by provider
         provider_buckets: dict[str, List[Tuple[AuthRecord, str]]] = {}

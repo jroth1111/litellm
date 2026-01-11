@@ -21,7 +21,7 @@ class AntigravitySubscriptionAdapter(BaseSubscriptionAdapter):
     capabilities = AdapterCapabilities(
         login_flow="browser_pkce",
         supports_refresh=True,
-        supports_models_list=False,
+        supports_models_list=True,
     )
 
     @staticmethod

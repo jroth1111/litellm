@@ -33,6 +33,19 @@ class BaseSearchTest(ABC):
         except litellm.InternalServerError:
             pytest.skip("Model is overloaded")
 
+    @pytest.fixture(autouse=True)
+    def _skip_if_missing_credentials(self):
+        provider = self.get_search_provider()
+        required_env = {
+            "exa_ai": ("EXA_API_KEY",),
+            "parallel_ai": ("PARALLEL_AI_API_KEY", "PARALLEL_API_KEY"),
+            "perplexity": ("PERPLEXITY_API_KEY",),
+            "searxng": ("SEARXNG_API_BASE",),
+        }.get(provider)
+
+        if required_env and not any(os.getenv(key) for key in required_env):
+            pytest.skip(f"Missing credentials for search provider '{provider}'")
+
     @pytest.mark.asyncio
     async def test_basic_search(self):
         """
@@ -151,4 +164,3 @@ class BaseSearchTest(ABC):
         print(f"\nSearch with optional params validated:")
         print(f"  - Requested max_results: 5")
         print(f"  - Received results: {len(response.results)}")
-

@@ -19,7 +19,7 @@ import time
 import traceback
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import (
     TYPE_CHECKING,
@@ -63,6 +63,7 @@ from litellm.litellm_core_utils.core_helpers import (
 from litellm.litellm_core_utils.coroutine_checker import coroutine_checker
 from litellm.litellm_core_utils.credential_accessor import CredentialAccessor
 from litellm.litellm_core_utils.dd_tracing import tracer
+from litellm.litellm_core_utils.duration_parser import duration_in_seconds
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLogging
 from litellm.litellm_core_utils.sensitive_data_masker import SensitiveDataMasker
 from litellm.router_strategy.budget_limiter import RouterBudgetLimiting
@@ -354,6 +355,8 @@ class Router:
         auth_hooks: Optional[AuthHooks] = None,
         auth_records_cache_ttl_seconds: float = 2.0,
         auth_rotate_on_status_codes: Optional[List[int]] = None,
+        auth_max_attempts_per_request: Optional[int] = None,
+        auth_cooldown_overrides: Optional[Dict[str, Any]] = None,
         auth_streaming_prefetch_first_chunk: bool = True,
         auth_subscription_rpm_backend: Literal["auto", "redis", "disabled"] = "auto",
     ) -> None:
@@ -475,6 +478,16 @@ class Router:
                 except Exception:
                     continue
             self.auth_rotate_on_status_codes = parsed_codes or {401, 403, 429}
+        try:
+            if auth_max_attempts_per_request is None:
+                self.auth_max_attempts_per_request = None
+            else:
+                self.auth_max_attempts_per_request = int(auth_max_attempts_per_request)
+        except Exception:
+            self.auth_max_attempts_per_request = None
+        self.auth_cooldown_overrides = self._parse_auth_cooldown_overrides(
+            auth_cooldown_overrides
+        )
         try:
             self.auth_records_cache_ttl_seconds = max(
                 0.0, float(auth_records_cache_ttl_seconds)
@@ -1279,7 +1292,9 @@ class Router:
                 masker = SensitiveDataMasker(visible_prefix=2, visible_suffix=0)
                 _deployment_copy["litellm_params"] = masker.mask_dict(litellm_params)
             elif "api_key" in litellm_params:
-                litellm_params["api_key"] = litellm_params["api_key"][:2] + "*" * 10
+                api_key = litellm_params.get("api_key")
+                if isinstance(api_key, str) and api_key:
+                    litellm_params["api_key"] = api_key[:2] + "*" * 10
 
             return _deployment_copy
         except Exception as e:
@@ -2230,15 +2245,75 @@ class Router:
             return True
         return False
 
+    @staticmethod
+    def _parse_auth_cooldown_overrides(
+        overrides: Optional[Dict[str, Any]],
+    ) -> Dict[str, timedelta]:
+        if not overrides:
+            return {}
+
+        parsed: Dict[str, timedelta] = {}
+
+        def _parse_value(value: Any) -> Optional[timedelta]:
+            if value is None:
+                return None
+            if isinstance(value, timedelta):
+                return value
+            if isinstance(value, (int, float)):
+                return timedelta(seconds=float(value))
+            if isinstance(value, str):
+                try:
+                    seconds = duration_in_seconds(value.strip())
+                except Exception:
+                    return None
+                return timedelta(seconds=seconds)
+            return None
+
+        for raw_key, raw_value in overrides.items():
+            if not isinstance(raw_key, str):
+                continue
+            key = raw_key.strip().lower().replace("-", "_")
+            value = _parse_value(raw_value)
+            if value is None:
+                continue
+            if key in ("rate_limit", "rate_limited", "quota"):
+                parsed["rate_limit"] = value
+            elif key in ("auth_error", "auth", "authentication"):
+                parsed["auth_error"] = value
+            elif key in ("server_error", "server", "api_error", "overloaded"):
+                parsed["server_error"] = value
+            else:
+                parsed[key] = value
+        return parsed
+
+    def _cooldown_override_for_error(
+        self, status_code: Optional[int], is_quota: bool
+    ) -> Optional[timedelta]:
+        overrides = self.auth_cooldown_overrides
+        if not overrides:
+            return None
+        if is_quota:
+            return overrides.get("rate_limit")
+        if status_code in (401, 403):
+            return overrides.get("auth_error")
+        if status_code is not None and status_code >= 500:
+            return overrides.get("server_error")
+        return overrides.get("default")
+
     def _should_rotate_on_auth_error(
-        self, exc: BaseException, status_code: Optional[int]
+        self,
+        exc: BaseException,
+        status_code: Optional[int],
+        *,
+        rotate_on_status_codes: Optional[set[int]] = None,
     ) -> bool:
         """
         Decide if an error should trigger same-request auth rotation.
         """
         if status_code is None:
             status_code = interpret_status_code(exc)
-        if status_code is not None and status_code in self.auth_rotate_on_status_codes:
+        status_codes = rotate_on_status_codes or self.auth_rotate_on_status_codes
+        if status_code is not None and status_code in status_codes:
             return True
         # Some upstreams don't reliably set status codes; fall back to error shape.
         if self._is_quota_error(exc, status_code):
@@ -2318,13 +2393,26 @@ class Router:
             )
 
     def _mark_auth_failure(
-        self, ctx: Optional[_AuthSelectionCtx], exc: BaseException
+        self,
+        ctx: Optional[_AuthSelectionCtx],
+        exc: BaseException,
+        *,
+        cooldown_override: Optional[timedelta] = None,
     ) -> Optional["AuthRecord"]:
         if ctx is None or self.auth_selector is None:
             return None
         status_code = interpret_status_code(exc)
         is_quota = self._is_quota_error(exc, status_code)
         retry_after = retry_after_from_exception(exc)
+        if cooldown_override is not None and (
+            retry_after is None or cooldown_override > retry_after
+        ):
+            retry_after = cooldown_override
+        config_override = self._cooldown_override_for_error(status_code, is_quota)
+        if config_override is not None and (
+            retry_after is None or config_override > retry_after
+        ):
+            retry_after = config_override
         if ctx and ctx.selection:
             provider = ctx.selection.auth.provider
             if is_quota:

@@ -1,5 +1,6 @@
 import os
 import sys
+import importlib.util
 import pytest
 from dotenv import load_dotenv
 
@@ -10,6 +11,14 @@ import httpx
 sys.path.insert(
     0, os.path.abspath("../..")
 )  # Adds the parent directory to the system path
+missing_deps = [
+    dep for dep in ("apscheduler", "fastapi") if importlib.util.find_spec(dep) is None
+]
+if missing_deps:
+    pytest.skip(
+        f"hashicorp tests require proxy dependencies: {', '.join(missing_deps)}",
+        allow_module_level=True,
+    )
 from unittest.mock import patch, MagicMock
 import logging
 from litellm._logging import verbose_logger
@@ -25,8 +34,9 @@ from litellm.secret_managers.hashicorp_secret_manager import HashicorpSecretMana
 
 
 @pytest.fixture
-def hashicorp_secret_manager():
+def hashicorp_secret_manager(monkeypatch):
     """Provide a fresh HashicorpSecretManager per test to avoid shared state."""
+    monkeypatch.setenv("HCP_VAULT_TOKEN", "test-token")
     manager = HashicorpSecretManager()
     manager.vault_addr = "https://test-cluster-public-vault-0f98180c.e98296b2.z1.hashicorp.cloud:8200"
     manager.vault_namespace = "admin"

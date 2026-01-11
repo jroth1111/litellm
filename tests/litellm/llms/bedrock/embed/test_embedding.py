@@ -1,6 +1,7 @@
 
 import os
 import sys
+import importlib.util
 
 sys.path.insert(
     0, os.path.abspath("../../../../..")
@@ -11,6 +12,9 @@ import pytest
 
 from litellm.types.utils import Embedding
 from litellm.main import bedrock_embedding, embedding, EmbeddingResponse, Usage
+
+if importlib.util.find_spec("botocore") is None:
+    pytest.skip("botocore not installed", allow_module_level=True)
 
 
 _mock_model_id = "arn:aws:bedrock:us-east-1:123412341234:application-inference-profile/abc123123"

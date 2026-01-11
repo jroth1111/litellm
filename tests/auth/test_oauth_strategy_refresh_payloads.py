@@ -18,6 +18,7 @@ import types
 from urllib.parse import parse_qs
 
 import pytest
+pytest.importorskip("respx")
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -162,4 +163,3 @@ def test_cursor_refresh_sends_json_refresh_token(respx_mock):
     payload = json.loads(req.content.decode())
     assert payload["refresh_token"] == "rt"
     assert "application/json" in req.headers["content-type"]
-

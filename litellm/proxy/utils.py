@@ -7,16 +7,20 @@ import smtplib
 import threading
 import time
 import traceback
-from datetime import datetime, timedelta
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import (
     TYPE_CHECKING,
     Any,
+    Callable,
     Dict,
+    Iterable,
     List,
     Literal,
     Optional,
+    Tuple,
     Union,
     cast,
     overload,
@@ -122,6 +126,7 @@ from litellm.types.utils import LLMResponseTypes, LoggedLiteLLMParams
 if TYPE_CHECKING:
     from opentelemetry.trace import Span as _Span
 
+    from litellm.auth.core import AuthRecord
     from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
 
     Span = Union[_Span, Any]
@@ -4374,6 +4379,362 @@ async def get_available_models_for_user(
     return all_models
 
 
+DEFAULT_MODEL_DISCOVERY_BASE_URL_KEYS: Tuple[str, ...] = (
+    "api_base",
+    "base_url",
+    "resource_url",
+    "endpoint",
+)
+
+
+@dataclass(frozen=True)
+class ModelDiscoverySpec:
+    provider: str
+    api_version: str
+    default_base_url: Optional[str]
+    extra_headers: Dict[str, str] = field(default_factory=dict)
+    base_url_keys: Tuple[str, ...] = DEFAULT_MODEL_DISCOVERY_BASE_URL_KEYS
+
+
+@dataclass(frozen=True)
+class DiscoveredModel:
+    model_id: str
+    provider: str
+    base_url: str
+    source_auth_id: Optional[str] = None
+
+
+def _normalize_discovered_model_id(provider: str, model_id: str) -> Optional[str]:
+    if not isinstance(model_id, str):
+        return None
+    raw = model_id.strip()
+    if not raw:
+        return None
+    key = (provider or "").strip().lower()
+    if key == "openai":
+        return raw
+    if key == "gemini":
+        if raw.startswith("models/"):
+            raw = raw.split("/", 1)[1]
+        if raw.startswith("gemini/"):
+            return raw
+        return f"gemini/{raw}"
+    if key in ("anthropic", "cursor", "github_copilot", "antigravity", "qwen"):
+        prefix = f"{key}/"
+        if raw.startswith(prefix):
+            return raw
+        return prefix + raw
+    return raw
+
+
+def _build_model_discovery_spec(provider: str) -> Optional[ModelDiscoverySpec]:
+    key = (provider or "").strip().lower()
+    if not key:
+        return None
+    if key == "openai":
+        return ModelDiscoverySpec(
+            provider=key,
+            api_version="v1",
+            default_base_url=os.getenv("OPENAI_API_BASE") or "https://api.openai.com",
+        )
+    if key == "cursor":
+        return ModelDiscoverySpec(
+            provider=key,
+            api_version="v1",
+            default_base_url=os.getenv("CURSOR_API_BASE")
+            or "https://api2.cursor.sh/hf/v1",
+        )
+    if key == "anthropic":
+        return ModelDiscoverySpec(
+            provider=key,
+            api_version="v1",
+            default_base_url=os.getenv("ANTHROPIC_API_BASE")
+            or "https://api.anthropic.com",
+            extra_headers={
+                "anthropic-version": os.getenv("ANTHROPIC_VERSION") or "2023-06-01"
+            },
+        )
+    if key == "gemini":
+        return ModelDiscoverySpec(
+            provider=key,
+            api_version="v1beta",
+            default_base_url=os.getenv("GEMINI_API_BASE")
+            or os.getenv("GOOGLE_AI_STUDIO_API_BASE")
+            or "https://generativelanguage.googleapis.com",
+        )
+    if key == "github_copilot":
+        return ModelDiscoverySpec(
+            provider=key,
+            api_version="v1",
+            default_base_url=os.getenv("GITHUB_COPILOT_API_BASE")
+            or "https://api.githubcopilot.com",
+        )
+    if key == "antigravity":
+        return ModelDiscoverySpec(
+            provider=key,
+            api_version=os.getenv("ANTIGRAVITY_API_VERSION") or "v1internal",
+            default_base_url=os.getenv("ANTIGRAVITY_API_BASE")
+            or "https://cloudcode-pa.googleapis.com",
+        )
+    if key == "qwen":
+        return ModelDiscoverySpec(
+            provider=key,
+            api_version=os.getenv("QWEN_API_VERSION") or "v1",
+            default_base_url=os.getenv("QWEN_API_BASE")
+            or os.getenv("QWEN_RESOURCE_URL"),
+        )
+    return None
+
+
+def _resolve_discovery_provider(litellm_params: Dict[str, Any]) -> str:
+    provider = str(litellm_params.get("custom_llm_provider") or "").strip().lower()
+    if provider:
+        return provider
+    model = str(litellm_params.get("model") or "").strip()
+    if not model:
+        return ""
+    if "/" in model:
+        return model.split("/", 1)[0].strip().lower()
+    try:
+        _, resolved, _, _ = litellm.get_llm_provider(
+            model=model,
+            custom_llm_provider=None,
+            api_base=litellm_params.get("api_base"),
+            api_key=litellm_params.get("api_key"),
+        )
+        return (resolved or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _dedupe_strings(values: Iterable[str]) -> List[str]:
+    seen = set()
+    out: List[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _extract_base_urls_from_records(
+    provider: str,
+    auth_records: Iterable["AuthRecord"],
+    keys: Tuple[str, ...],
+) -> List[str]:
+    provider_key = (provider or "").strip().lower()
+    urls: List[str] = []
+    for rec in auth_records:
+        if rec.provider.strip().lower() != provider_key:
+            continue
+        for container in (rec.metadata or {}, rec.attributes or {}):
+            for key in keys:
+                value = container.get(key)
+                if isinstance(value, str) and value.strip():
+                    urls.append(value.strip())
+    return urls
+
+
+def _resolve_model_discovery_base_urls(
+    provider: str,
+    litellm_params: Dict[str, Any],
+    auth_records: Iterable["AuthRecord"],
+    spec: ModelDiscoverySpec,
+) -> List[str]:
+    base_urls: List[str] = []
+    api_base = litellm_params.get("api_base")
+    if isinstance(api_base, str) and api_base.strip():
+        base_urls.append(api_base.strip())
+    base_urls.extend(
+        _extract_base_urls_from_records(
+            provider=provider, auth_records=auth_records, keys=spec.base_url_keys
+        )
+    )
+    if not base_urls and spec.default_base_url:
+        base_urls.append(spec.default_base_url)
+    return _dedupe_strings(base_urls)
+
+
+def _filter_healthy_auth_records(
+    auth_records: Iterable["AuthRecord"],
+) -> List["AuthRecord"]:
+    from litellm.auth.core import AuthStatus
+
+    now = datetime.now(timezone.utc)
+    healthy: List["AuthRecord"] = []
+    for rec in auth_records:
+        if rec.status in (AuthStatus.DISABLED, AuthStatus.EXPIRED):
+            continue
+        if rec.unavailable and rec.next_retry_after and rec.next_retry_after > now:
+            continue
+        healthy.append(rec)
+    return healthy
+
+
+async def discover_oauth_models_for_router(
+    llm_router: Router,
+    *,
+    force_refresh: bool = False,
+) -> List[DiscoveredModel]:
+    store = getattr(llm_router, "auth_store", None)
+    namespace = getattr(llm_router, "auth_namespace", None)
+    strategies = getattr(llm_router, "auth_strategies", {}) or {}
+    if store is None or not namespace or not strategies:
+        return []
+
+    auth_records = _filter_healthy_auth_records(store.list(namespace))
+    if not auth_records:
+        return []
+    deployments = llm_router.get_model_list() or []
+    candidates: Dict[Tuple[str, str, str], Tuple[Any, ModelDiscoverySpec]] = {}
+    provider_to_base_urls: Dict[str, set[str]] = {}
+    provider_to_spec: Dict[str, ModelDiscoverySpec] = {}
+    provider_to_strategy: Dict[str, Any] = {}
+
+    for dep in deployments:
+        if (
+            str(dep.get("auth_mode", "auto") or "auto").strip().lower()
+            != "subscription"
+        ):
+            continue
+        litellm_params = dep.get("litellm_params") or {}
+        provider_key = _resolve_discovery_provider(litellm_params)
+        if not provider_key:
+            continue
+        strat = strategies.get(provider_key)
+        if strat is None:
+            continue
+        spec = _build_model_discovery_spec(provider_key)
+        if spec is None:
+            continue
+        provider_to_strategy[provider_key] = strat
+        provider_to_spec[provider_key] = spec
+        base_urls = _resolve_model_discovery_base_urls(
+            provider=provider_key,
+            litellm_params=litellm_params,
+            auth_records=auth_records,
+            spec=spec,
+        )
+        if base_urls:
+            provider_to_base_urls.setdefault(provider_key, set()).update(base_urls)
+
+    providers_with_auth = {rec.provider.strip().lower() for rec in auth_records}
+    for provider_key in providers_with_auth:
+        if provider_key in provider_to_base_urls:
+            continue
+        strat = strategies.get(provider_key)
+        if strat is None:
+            continue
+        spec = _build_model_discovery_spec(provider_key)
+        if spec is None:
+            continue
+        provider_to_strategy.setdefault(provider_key, strat)
+        provider_to_spec.setdefault(provider_key, spec)
+        base_urls = _resolve_model_discovery_base_urls(
+            provider=provider_key,
+            litellm_params={},
+            auth_records=auth_records,
+            spec=spec,
+        )
+        if base_urls:
+            provider_to_base_urls.setdefault(provider_key, set()).update(base_urls)
+
+    for provider_key, base_urls in provider_to_base_urls.items():
+        strat = provider_to_strategy.get(provider_key)
+        spec = provider_to_spec.get(provider_key)
+        if strat is None or spec is None:
+            continue
+        caps = getattr(strat, "capabilities", None)
+        if not getattr(caps, "supports_models_list", False):
+            continue
+        for base_url in base_urls:
+            candidates[(provider_key, base_url, spec.api_version)] = (strat, spec)
+
+    from litellm.auth.core import RequestContext
+    from litellm.auth.model_discovery import (
+        discover_models_with_rotation,
+        static_models_for_provider,
+    )
+
+    discovered: List[DiscoveredModel] = []
+    for (provider_key, base_url, _), (strat, spec) in candidates.items():
+
+        def _refresh_one(rec):
+            if not getattr(strat, "supports_refresh", True):
+                raise ValueError("refresh not supported")
+            refreshed = strat.refresh(rec, ctx=RequestContext(model=""))  # type: ignore[arg-type]
+            store.save(namespace, refreshed)
+            return refreshed
+
+        entry = await discover_models_with_rotation(
+            provider=provider_key,
+            base_url=base_url,
+            auth_records=auth_records,
+            prepare_headers=strat.prepare,
+            refresh_record=_refresh_one
+            if getattr(strat, "supports_refresh", True)
+            else None,
+            timeout_seconds=10.0,
+            force_refresh=force_refresh,
+            api_version=spec.api_version,
+            extra_headers=spec.extra_headers,
+            normalize_model_id=lambda mid, p=provider_key: _normalize_discovered_model_id(
+                p, mid
+            ),
+        )
+        for mid in entry.models:
+            discovered.append(
+                DiscoveredModel(
+                    model_id=mid,
+                    provider=provider_key,
+                    base_url=base_url,
+                    source_auth_id=entry.source_auth_id,
+                )
+            )
+
+    # Static fallback for providers without models endpoints.
+    for provider_key in providers_with_auth:
+        strat = strategies.get(provider_key)
+        if strat is None:
+            continue
+        caps = getattr(strat, "capabilities", None)
+        if getattr(caps, "supports_models_list", False):
+            continue
+        spec = _build_model_discovery_spec(provider_key)
+        base_url = spec.default_base_url if spec is not None else ""
+        source_auth_id = next(
+            (
+                rec.id
+                for rec in auth_records
+                if rec.provider.strip().lower() == provider_key
+            ),
+            None,
+        )
+        for mid in static_models_for_provider(provider_key):
+            normalized = _normalize_discovered_model_id(provider_key, mid) or mid
+            discovered.append(
+                DiscoveredModel(
+                    model_id=normalized,
+                    provider=provider_key,
+                    base_url=base_url or "",
+                    source_auth_id=source_auth_id,
+                )
+            )
+    return discovered
+
+
+async def refresh_oauth_model_discovery(llm_router: Router) -> None:
+    try:
+        await discover_oauth_models_for_router(
+            llm_router=llm_router, force_refresh=True
+        )
+    except Exception as e:
+        verbose_proxy_logger.debug(
+            "oauth model discovery refresh failed: %s", e
+        )
+
+
 def create_model_info_response(
     model_id: str,
     provider: str,
@@ -4395,6 +4756,7 @@ def create_model_info_response(
         Dictionary containing model information
     """
     from litellm.proxy.auth.model_checks import get_all_fallbacks
+    from litellm.auth.model_discovery import get_model_metadata
 
     model_info = {
         "id": model_id,
@@ -4402,6 +4764,15 @@ def create_model_info_response(
         "created": DEFAULT_MODEL_CREATED_AT_TIME,
         "owned_by": provider,
     }
+
+    metadata_hint = get_model_metadata(model_id) or {}
+    if metadata_hint.get("context_window"):
+        model_info["context_window"] = metadata_hint["context_window"]
+    if metadata_hint.get("max_output_tokens"):
+        model_info["max_output_tokens"] = metadata_hint["max_output_tokens"]
+    caps = metadata_hint.get("capabilities")
+    if isinstance(caps, dict) and caps:
+        model_info["capabilities"] = caps
 
     # Add metadata if requested
     if include_metadata:
@@ -4430,6 +4801,66 @@ def create_model_info_response(
         model_info["metadata"] = metadata
 
     return model_info
+
+
+def create_anthropic_model_info_response(
+    model_id: str,
+    *,
+    created_at: Optional[str] = None,
+    display_name: Optional[str] = None,
+) -> dict:
+    from litellm.auth.model_discovery import get_model_metadata
+
+    if created_at is None:
+        created_at = datetime.fromtimestamp(
+            DEFAULT_MODEL_CREATED_AT_TIME, tz=timezone.utc
+        ).isoformat()
+    response = {
+        "id": model_id,
+        "created_at": created_at,
+        "display_name": display_name or model_id,
+        "type": "model",
+    }
+    metadata_hint = get_model_metadata(model_id) or {}
+    if metadata_hint.get("context_window"):
+        response["context_window"] = metadata_hint["context_window"]
+    if metadata_hint.get("max_output_tokens"):
+        response["max_output_tokens"] = metadata_hint["max_output_tokens"]
+    caps = metadata_hint.get("capabilities")
+    if isinstance(caps, dict) and caps:
+        response["capabilities"] = caps
+    return response
+
+
+def build_anthropic_model_list_response(
+    model_ids: List[str],
+    *,
+    after_id: Optional[str] = None,
+    before_id: Optional[str] = None,
+    limit: Optional[int] = None,
+) -> dict:
+    ids = list(model_ids)
+    if after_id and after_id in ids:
+        idx = ids.index(after_id)
+        ids = ids[idx + 1 :]
+    if before_id and before_id in ids:
+        idx = ids.index(before_id)
+        ids = ids[:idx]
+    full_count = len(ids)
+    limit_val = 20 if limit is None else limit
+    try:
+        limit_int = int(limit_val)
+    except Exception:
+        limit_int = 20
+    limit_int = max(1, min(limit_int, 1000))
+    ids = ids[:limit_int]
+    data = [create_anthropic_model_info_response(mid) for mid in ids]
+    return {
+        "data": data,
+        "first_id": ids[0] if ids else None,
+        "last_id": ids[-1] if ids else None,
+        "has_more": len(ids) < full_count,
+    }
 
 
 def validate_model_access(

@@ -3,22 +3,25 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any, Dict, Optional
 
-from ..core import AuthRecord, RequestContext
+from ..core import AuthKind, AuthRecord, RequestContext
 from .base import AdapterCapabilities, BaseSubscriptionAdapter
 from .llms_oauth_loader import load_module
 from .utils import token_dataclass_to_metadata
 
+# Anthropic API version header value
+ANTHROPIC_API_VERSION = "2023-06-01"
+
 
 class AnthropicSubscriptionAdapter(BaseSubscriptionAdapter):
     """Anthropic Claude subscription OAuth adapter."""
-    
+
     provider = "anthropic"
     supports_refresh = True
     refresh_lead_default = timedelta(minutes=5)
     capabilities = AdapterCapabilities(
         login_flow="browser_pkce",
         supports_refresh=True,
-        supports_models_list=False,
+        supports_models_list=True,
     )
 
     @staticmethod
@@ -31,6 +34,38 @@ class AnthropicSubscriptionAdapter(BaseSubscriptionAdapter):
     @property
     def default_redirect_uri(self) -> str:
         return str(self._oauth().ANTHROPIC_REDIRECT_URI)
+
+    def prepare(
+        self, headers: Dict[str, str], ctx: RequestContext, auth: AuthRecord
+    ) -> Dict[str, str]:
+        """
+        Add Anthropic-specific headers.
+
+        Anthropic requires:
+        - Authorization: Bearer <token>
+        - anthropic-version: API version header
+        - anthropic-beta: Optional beta features header
+        """
+        token = auth.resolve_secret()
+        if not token:
+            raise ValueError(f"missing auth token for {self.provider}")
+
+        new_headers = dict(headers)
+        if auth.kind in (AuthKind.API, AuthKind.WELLKNOWN):
+            new_headers["x-api-key"] = str(token)
+        else:
+            new_headers["Authorization"] = f"Bearer {token}"
+
+        # Add Anthropic-specific version header
+        if "anthropic-version" not in new_headers:
+            new_headers["anthropic-version"] = ANTHROPIC_API_VERSION
+
+        # Add beta features header if specified in auth attributes
+        beta_features = auth.attributes.get("anthropic_beta")
+        if beta_features and "anthropic-beta" not in new_headers:
+            new_headers["anthropic-beta"] = beta_features
+
+        return new_headers
 
     def authorize_url(
         self, *, state: str, code_challenge: str, redirect_uri: str
@@ -61,7 +96,7 @@ class AnthropicSubscriptionAdapter(BaseSubscriptionAdapter):
 
     def supports(self, model: str) -> bool:
         """Check if this adapter supports the given model.
-        
+
         Matches models starting with 'anthropic/' or 'claude'.
         """
         lowered = (model or "").lower()

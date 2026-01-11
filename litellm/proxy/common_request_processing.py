@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import traceback
 from datetime import datetime
 from typing import (
@@ -38,6 +39,12 @@ from litellm.proxy.common_utils.callback_utils import (
 from litellm.proxy.route_llm_request import route_request
 from litellm.proxy.utils import ProxyLogging
 from litellm.router import Router
+
+def _use_canonical_router(general_settings: dict) -> bool:
+    if general_settings.get("use_canonical_router") is True:
+        return True
+    env = os.getenv("LITELLM_USE_CANONICAL_ROUTER", "")
+    return env.strip().lower() in ("1", "true", "yes", "on")
 from litellm.types.utils import ServerToolUse
 
 if TYPE_CHECKING:
@@ -535,6 +542,27 @@ class ProxyBaseLLMRequestProcessing:
             llm_router=llm_router,
         )
 
+        canonical_mode = False
+        effective_route_type = route_type
+        if route_type == "anthropic_messages" and _use_canonical_router(
+            general_settings or {}
+        ):
+            try:
+                from litellm.canonical import (
+                    anthropic_request_to_canonical,
+                    canonical_to_openai_request,
+                )
+
+                canonical_request = anthropic_request_to_canonical(self.data)
+                self.data = canonical_to_openai_request(canonical_request)
+                canonical_mode = True
+                effective_route_type = "acompletion"
+                self.data["_canonical_original_route"] = "anthropic_messages"
+            except Exception as e:
+                verbose_proxy_logger.debug(
+                    "canonical routing disabled for anthropic_messages: %s", e
+                )
+
         tasks = []
         tasks.append(
             proxy_logging_obj.during_call_hook(
@@ -554,7 +582,7 @@ class ProxyBaseLLMRequestProcessing:
         # Do not change this - it should be a constant time fetch - ALWAYS
         llm_call = await route_request(
             data=self.data,
-            route_type=route_type,
+            route_type=effective_route_type,
             llm_router=llm_router,
             user_model=user_model,
         )
@@ -570,6 +598,24 @@ class ProxyBaseLLMRequestProcessing:
         response = responses[1]
 
         hidden_params = getattr(response, "_hidden_params", {}) or {}
+        # Non-streaming canonical response conversion
+        # (Streaming responses are handled in the streaming branch below)
+        is_streaming = self._is_streaming_request(
+            data=self.data, is_streaming_request=is_streaming_request
+        ) or self._is_streaming_response(response)
+        if canonical_mode and not is_streaming:
+            try:
+                from litellm.canonical.mapper import (
+                    canonical_to_anthropic_response,
+                    openai_response_to_canonical,
+                )
+
+                canonical_response = openai_response_to_canonical(response)
+                response = canonical_to_anthropic_response(canonical_response)
+            except Exception as e:
+                verbose_proxy_logger.debug(
+                    "canonical response conversion failed: %s", e
+                )
         model_id = hidden_params.get("model_id", None) or ""
 
         # Fallback: extract model_id from litellm_metadata if not in hidden_params
@@ -594,11 +640,7 @@ class ProxyBaseLLMRequestProcessing:
                 litellm_call_id=self.data.get("litellm_call_id", ""), status="success"
             )
         )
-        if self._is_streaming_request(
-            data=self.data, is_streaming_request=is_streaming_request
-        ) or self._is_streaming_response(
-            response
-        ):  # use generate_responses to stream responses
+        if is_streaming:  # use generate_responses to stream responses
             custom_headers = ProxyBaseLLMRequestProcessing.get_custom_headers(
                 user_api_key_dict=user_api_key_dict,
                 call_id=logging_obj.litellm_call_id,
@@ -637,14 +679,26 @@ class ProxyBaseLLMRequestProcessing:
                         headers=custom_headers,
                     )
             elif route_type == "anthropic_messages":
-                selected_data_generator = (
-                    ProxyBaseLLMRequestProcessing.async_sse_data_generator(
-                        response=response,
-                        user_api_key_dict=user_api_key_dict,
-                        request_data=self.data,
-                        proxy_logging_obj=proxy_logging_obj,
+                # Check if we're in canonical mode with streaming
+                if canonical_mode:
+                    # Use canonical streaming converter
+                    selected_data_generator = (
+                        ProxyBaseLLMRequestProcessing.canonical_openai_to_anthropic_stream_generator(
+                            response=response,
+                            user_api_key_dict=user_api_key_dict,
+                            request_data=self.data,
+                            proxy_logging_obj=proxy_logging_obj,
+                        )
                     )
-                )
+                else:
+                    selected_data_generator = (
+                        ProxyBaseLLMRequestProcessing.async_sse_data_generator(
+                            response=response,
+                            user_api_key_dict=user_api_key_dict,
+                            request_data=self.data,
+                            proxy_logging_obj=proxy_logging_obj,
+                        )
+                    )
                 return await create_streaming_response(
                     generator=selected_data_generator,
                     media_type="text/event-stream",
@@ -1009,6 +1063,108 @@ class ProxyBaseLLMRequestProcessing:
             )
             error_returned = json.dumps({"error": proxy_exception.to_dict()})
             yield f"{STREAM_SSE_DATA_PREFIX}{error_returned}\n\n"
+
+    @staticmethod
+    async def canonical_openai_to_anthropic_stream_generator(
+        response,
+        user_api_key_dict: UserAPIKeyAuth,
+        request_data: dict,
+        proxy_logging_obj: ProxyLogging,
+    ):
+        """
+        Converts OpenAI streaming chunks to Anthropic SSE format via canonical intermediary.
+
+        Used when canonical routing is enabled and an Anthropic client requests streaming
+        from an OpenAI-format backend.
+        """
+        from litellm.canonical.sse import (
+            OpenAIStreamToCanonicalAdapter,
+            CanonicalStreamToAnthropicAdapter,
+        )
+
+        verbose_proxy_logger.debug("inside canonical_openai_to_anthropic_stream_generator")
+
+        # Get the model from request data for the Anthropic adapter
+        model = request_data.get("model", "")
+
+        openai_to_canonical = OpenAIStreamToCanonicalAdapter()
+        canonical_to_anthropic = CanonicalStreamToAnthropicAdapter(model=model)
+
+        try:
+            str_so_far = ""
+            async for (
+                chunk
+            ) in proxy_logging_obj.async_post_call_streaming_iterator_hook(
+                user_api_key_dict=user_api_key_dict,
+                response=response,
+                request_data=request_data,
+            ):
+                verbose_proxy_logger.debug(
+                    "canonical_openai_to_anthropic_stream_generator: received streaming chunk - {}".format(chunk)
+                )
+
+                # Call hooks - modify outgoing data
+                chunk = await proxy_logging_obj.async_post_call_streaming_hook(
+                    user_api_key_dict=user_api_key_dict,
+                    response=chunk,
+                    data=request_data,
+                    str_so_far=str_so_far,
+                )
+
+                if isinstance(chunk, (ModelResponse, ModelResponseStream)):
+                    response_str = litellm.get_response_string(response_obj=chunk)
+                    str_so_far += response_str
+
+                # Convert OpenAI chunk -> Canonical events -> Anthropic SSE
+                canonical_events = openai_to_canonical.feed(chunk)
+                for canonical_event in canonical_events:
+                    anthropic_events = canonical_to_anthropic.feed(canonical_event)
+                    for anthropic_event in anthropic_events:
+                        sse_type = anthropic_event.get("sse_type", "")
+                        data = anthropic_event.get("data", {})
+                        # Format as Anthropic SSE: event: <type>\ndata: <json>\n\n
+                        sse_line = f"event: {sse_type}\ndata: {safe_dumps(data)}\n\n"
+                        yield sse_line
+
+        except Exception as e:
+            verbose_proxy_logger.exception(
+                "litellm.proxy.proxy_server.canonical_openai_to_anthropic_stream_generator(): Exception occured - {}".format(
+                    str(e)
+                )
+            )
+            # Allow callbacks to transform the error response
+            transformed_exception = await proxy_logging_obj.post_call_failure_hook(
+                user_api_key_dict=user_api_key_dict,
+                original_exception=e,
+                request_data=request_data,
+            )
+            if transformed_exception is not None:
+                e = transformed_exception
+            verbose_proxy_logger.debug(
+                f"\033[1;31mAn error occurred: {e}\n\n Debug this by setting `--debug`, e.g. `litellm --model gpt-3.5-turbo --debug`"
+            )
+
+            if isinstance(e, HTTPException):
+                raise e
+            else:
+                error_traceback = traceback.format_exc()
+                error_msg = f"{str(e)}\n\n{error_traceback}"
+
+            proxy_exception = ProxyException(
+                message=getattr(e, "message", error_msg),
+                type=getattr(e, "type", "None"),
+                param=getattr(e, "param", "None"),
+                code=getattr(e, "status_code", 500),
+            )
+            # Format error in Anthropic SSE style
+            error_data = {
+                "type": "error",
+                "error": {
+                    "type": proxy_exception.type,
+                    "message": proxy_exception.message,
+                }
+            }
+            yield f"event: error\ndata: {json.dumps(error_data)}\n\n"
 
     @staticmethod
     def _process_chunk_with_cost_injection(chunk: Any, model_name: str) -> Any:

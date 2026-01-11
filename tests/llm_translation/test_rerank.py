@@ -471,6 +471,12 @@ def test_cohere_rerank_v2_client():
 
 @pytest.mark.flaky(retries=3, delay=1)
 def test_rerank_cohere_api():
+    if not (
+        os.getenv("COHERE_API_KEY")
+        or os.getenv("CO_API_KEY")
+        or getattr(litellm, "cohere_key", None)
+    ):
+        pytest.skip("COHERE_API_KEY or CO_API_KEY required for Cohere rerank API test")
     response = litellm.rerank(
         model="cohere/rerank-english-v3.0",
         query="hello",
@@ -486,6 +492,7 @@ def test_rerank_cohere_api():
 
 
 def test_rerank_infer_region_from_model_arn(monkeypatch):
+    pytest.importorskip("botocore")
 
     mock_response = MagicMock()
 

@@ -27,6 +27,10 @@ def watsonx_chat_completion_call():
         client=None,
         patch_token_call=True,
     ):
+        if not os.getenv("WX_PROJECT_ID"):
+            os.environ["WX_PROJECT_ID"] = "test-project-id"
+        if not os.getenv("WATSONX_API_BASE"):
+            os.environ["WATSONX_API_BASE"] = "https://us-south.ml.cloud.ibm.com"
         if messages is None:
             messages = [{"role": "user", "content": "Hello, how are you?"}]
         if client is None:

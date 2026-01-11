@@ -3,6 +3,7 @@ import os
 import sys
 from datetime import datetime
 from unittest.mock import AsyncMock, Mock, patch
+import importlib.util
 import pytest
 import base64
 import httpx
@@ -13,6 +14,9 @@ sys.path.insert(
 
 import litellm
 from litellm.llms.custom_httpx.http_handler import HTTPHandler, AsyncHTTPHandler
+
+if importlib.util.find_spec("botocore") is None:
+    pytest.skip("botocore not installed", allow_module_level=True)
 
 titan_embedding_response = {"embedding": [0.1, 0.2, 0.3], "inputTextTokenCount": 10}
 

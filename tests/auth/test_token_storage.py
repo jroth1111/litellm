@@ -8,6 +8,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 TOKEN_STORAGE_PATH = ROOT / "litellm" / "auth" / "token_storage.py"
+TEST_AUTH_KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
 
 def _load_module(path: pathlib.Path, name: str):
@@ -36,7 +37,7 @@ class TokenStorageTests(unittest.TestCase):
         JsonTokenStorage = mod.JsonTokenStorage
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            os.environ["LITELLM_AUTH_ENCRYPTION_KEY"] = "test-secret"
+            os.environ["LITELLM_AUTH_ENCRYPTION_KEY"] = TEST_AUTH_KEY
             store = JsonTokenStorage(tmpdir)
             rec = TokenRecord(id="t1", provider="anthropic", metadata={"code": "abc"})
             store.save(rec)

@@ -11,6 +11,7 @@ sys.path.insert(
 
 import httpx
 import pytest
+pytest.importorskip("respx")
 from respx import MockRouter
 
 import litellm
@@ -222,5 +223,4 @@ async def test_azure_o1_series_response_format_extra_params():
         assert request_body["tool_choice"] == tool_choice
 
     
-
 

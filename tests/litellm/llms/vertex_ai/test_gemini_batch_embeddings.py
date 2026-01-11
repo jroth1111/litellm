@@ -47,13 +47,7 @@ def test_gemini_batch_embeddings_with_custom_api_base_and_auth_header():
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
-            "predictions": [
-                {
-                    "embeddings": {
-                        "values": [0.1, 0.2, 0.3, 0.4, 0.5]
-                    }
-                }
-            ]
+            "embeddings": [{"values": [0.1, 0.2, 0.3, 0.4, 0.5]}]
         }
         mock_post.return_value = mock_response
         
@@ -109,13 +103,7 @@ def test_gemini_batch_embeddings_with_extra_headers():
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
-            "predictions": [
-                {
-                    "embeddings": {
-                        "values": [0.1, 0.2, 0.3]
-                    }
-                }
-            ]
+            "embeddings": [{"values": [0.1, 0.2, 0.3]}]
         }
         mock_post.return_value = mock_response
         
@@ -142,4 +130,3 @@ def test_gemini_batch_embeddings_with_extra_headers():
         assert headers["Authorization"] == "Bearer test-token"
         assert "X-Custom" in headers
         assert headers["X-Custom"] == "custom-value"
-

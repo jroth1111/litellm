@@ -12,8 +12,18 @@ from io import BytesIO
 from pathlib import Path
 
 import pytest
+import importlib.util
 
 sys.path.insert(0, os.path.abspath("../.."))
+
+missing_deps = [
+    dep for dep in ("fastapi", "apscheduler") if importlib.util.find_spec(dep) is None
+]
+if missing_deps:
+    pytest.skip(
+        f"skills e2e tests require proxy dependencies: {', '.join(missing_deps)}",
+        allow_module_level=True,
+    )
 
 import litellm
 import litellm.proxy.proxy_server

@@ -1,5 +1,6 @@
 import os
 import sys
+import pathlib
 import traceback
 
 from dotenv import load_dotenv
@@ -31,11 +32,9 @@ error_names = {
 # sys.path = original_sys_path
 
 
-# Parse the documentation to extract documented keys
-# repo_base = "./"
-repo_base = "../../"
-print(os.listdir(repo_base))
-docs_path = f"{repo_base}/docs/my-website/docs/exception_mapping.md"  # Path to the documentation
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+print(os.listdir(REPO_ROOT))
+docs_path = REPO_ROOT / "docs" / "my-website" / "docs" / "exception_mapping.md"
 documented_keys = set()
 try:
     with open(docs_path, "r", encoding="utf-8") as docs_file:
@@ -63,7 +62,7 @@ try:
 
 except Exception as e:
     raise Exception(
-        f"Error reading documentation: {e}, \n repo base - {os.listdir(repo_base)}"
+        f"Error reading documentation: {e}, \n repo base - {os.listdir(REPO_ROOT)}"
     )
 
 print(documented_keys)

@@ -7,8 +7,6 @@ if TYPE_CHECKING:
 
 from litellm.types.prompts.init_prompts import SupportedPromptIntegrations
 
-from .dotprompt_manager import DotpromptManager
-
 # Global instances
 global_prompt_directory: Optional[str] = None
 global_prompt_manager: Optional["PromptManager"] = None
@@ -64,18 +62,16 @@ def prompt_initializer(
     if dotprompt_content and not prompt_data and not prompt_file:
         prompt_data = _get_prompt_data_from_dotprompt_content(dotprompt_content)
 
-    try:
-        dot_prompt_manager = DotpromptManager(
-            prompt_directory=prompt_directory,
-            prompt_data=prompt_data,
-            prompt_file=prompt_file,
-            prompt_id=prompt_id,
-        )
+    from .dotprompt_manager import DotpromptManager
 
-        return dot_prompt_manager
-    except Exception as e:
+    dot_prompt_manager = DotpromptManager(
+        prompt_directory=prompt_directory,
+        prompt_data=prompt_data,
+        prompt_file=prompt_file,
+        prompt_id=prompt_id,
+    )
 
-        raise e
+    return dot_prompt_manager
 
 
 prompt_initializer_registry = {
@@ -91,3 +87,12 @@ __all__ = [
     "global_prompt_directory",
     "global_prompt_manager",
 ]
+
+
+def __getattr__(name: str):
+    if name in {"DotpromptManager", "PromptManager", "PromptTemplate"}:
+        from .dotprompt_manager import DotpromptManager
+        from .prompt_manager import PromptManager, PromptTemplate
+
+        return {"DotpromptManager": DotpromptManager, "PromptManager": PromptManager, "PromptTemplate": PromptTemplate}[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

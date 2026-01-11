@@ -111,6 +111,7 @@ def test_chat_completion_snowflake(sync_mode):
                 model="snowflake/mistral-7b",
                 messages=messages,
                 api_base="https://exampleopenaiendpoint-production.up.railway.app/v1/chat/completions",
+                api_key="test-jwt",
                 client=sync_handler,
             )
             assert response is not None
@@ -125,6 +126,7 @@ def test_chat_completion_snowflake(sync_mode):
                     model="snowflake/mistral-7b",
                     messages=messages,
                     api_base="https://exampleopenaiendpoint-production.up.railway.app/v1/chat/completions",
+                    api_key="test-jwt",
                     client=async_handler,
                 )
             )
@@ -165,6 +167,7 @@ def test_chat_completion_snowflake_stream(sync_mode):
                 max_tokens=100,
                 stream=True,
                 api_base="https://exampleopenaiendpoint-production.up.railway.app/v1/chat/completions",
+                api_key="test-jwt",
                 client=sync_handler,
             )
             
@@ -196,6 +199,7 @@ def test_chat_completion_snowflake_stream(sync_mode):
                     max_tokens=100,
                     stream=True,
                     api_base="https://exampleopenaiendpoint-production.up.railway.app/v1/chat/completions",
+                    api_key="test-jwt",
                     client=async_handler,
                 )
                 

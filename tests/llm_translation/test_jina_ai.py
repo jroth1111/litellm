@@ -4,6 +4,8 @@ import sys
 from datetime import datetime
 from unittest.mock import AsyncMock
 
+import pytest
+
 sys.path.insert(
     0, os.path.abspath("../..")
 )  # Adds the parent directory to the system path
@@ -24,6 +26,8 @@ class TestJinaAI(BaseLLMRerankTest):
 
 
 def test_jina_ai_embedding():
+    if not (os.getenv("JINA_AI_API_KEY") or os.getenv("JINA_AI_TOKEN")):
+        pytest.skip("JINA_AI_API_KEY/JINA_AI_TOKEN not set")
     litellm.embedding(
         model="jina_ai/jina-embeddings-v3",
         input=["a"],

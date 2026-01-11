@@ -866,6 +866,8 @@ def test_sync_openai_messages():
     """
     Test the anthropic_messages with sync request
     """
+    if not os.getenv("OPENAI_API_KEY") and not litellm.api_key:
+        pytest.skip("OPENAI_API_KEY required for OpenAI passthrough call")
     litellm._turn_on_debug()
     response = litellm.anthropic.messages.create(
         messages=[{"role": "user", "content": "Hello, can you tell me a short joke?"}],

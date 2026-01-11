@@ -22,6 +22,7 @@ sys.path.insert(
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+pytest.importorskip("botocore")
 
 import litellm
 from litellm import (

@@ -6,6 +6,12 @@ import sys
 
 import pytest
 
+if importlib.util.find_spec("vertexai") is None:
+    pytest.skip(
+        "vector store tests require vertexai dependencies",
+        allow_module_level=True,
+    )
+
 sys.path.insert(
     0, os.path.abspath("../..")
 )  # Adds the parent directory to the system path

@@ -167,8 +167,10 @@ def test_litellm_speech_vertex_ai_chirp(mock_get_token, mock_ensure_token, mock_
     assert call_kwargs["url"] == "https://texttospeech.googleapis.com/v1/text:synthesize"
 
     # Verify request body structure
-    assert "data" in call_kwargs
-    request_body = json.loads(call_kwargs["data"])
+    if "json" in call_kwargs:
+        request_body = call_kwargs["json"]
+    else:
+        request_body = json.loads(call_kwargs["data"])
 
     # Verify input
     assert "input" in request_body
@@ -186,5 +188,4 @@ def test_litellm_speech_vertex_ai_chirp(mock_get_token, mock_ensure_token, mock_
     assert "headers" in call_kwargs
     assert "Authorization" in call_kwargs["headers"]
     assert call_kwargs["headers"]["Authorization"] == "Bearer mock-token"
-
 
